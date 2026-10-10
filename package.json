@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "migrate:category-images": "node scripts/migrate-category-images.mjs",
+    "migrate:product-images": "node scripts/migrate-product-images.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

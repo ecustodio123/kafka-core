@@ -20,6 +20,14 @@ drop policy if exists "authenticated users upload own product images" on storage
 drop policy if exists "authenticated users update own product images" on storage.objects;
 drop policy if exists "authenticated users delete own product images" on storage.objects;
 
+create or replace function public.kafka_storage_segment_id(segment text)
+returns bigint
+language sql
+immutable
+as $$
+  select nullif(split_part(segment, '-', 1), '')::bigint;
+$$;
+
 create policy "public read product images"
 on storage.objects
 for select
@@ -36,8 +44,14 @@ with check (
     select 1
     from public.stores
     join public.products on products.store_id = stores.id
-    where stores.id = (storage.foldername(storage.objects.name))[1]::bigint
-    and products.id = (storage.foldername(storage.objects.name))[2]::bigint
+    where stores.id = public.kafka_storage_segment_id(
+      (storage.foldername(storage.objects.name))[1]
+    )
+    and products.id = case
+      when (storage.foldername(storage.objects.name))[2] = 'products'
+        then public.kafka_storage_segment_id((storage.foldername(storage.objects.name))[3])
+      else public.kafka_storage_segment_id((storage.foldername(storage.objects.name))[2])
+    end
     and stores.owner_user_id = auth.uid()
   )
 );
@@ -52,8 +66,14 @@ using (
     select 1
     from public.stores
     join public.products on products.store_id = stores.id
-    where stores.id = (storage.foldername(storage.objects.name))[1]::bigint
-    and products.id = (storage.foldername(storage.objects.name))[2]::bigint
+    where stores.id = public.kafka_storage_segment_id(
+      (storage.foldername(storage.objects.name))[1]
+    )
+    and products.id = case
+      when (storage.foldername(storage.objects.name))[2] = 'products'
+        then public.kafka_storage_segment_id((storage.foldername(storage.objects.name))[3])
+      else public.kafka_storage_segment_id((storage.foldername(storage.objects.name))[2])
+    end
     and stores.owner_user_id = auth.uid()
   )
 )
@@ -63,8 +83,14 @@ with check (
     select 1
     from public.stores
     join public.products on products.store_id = stores.id
-    where stores.id = (storage.foldername(storage.objects.name))[1]::bigint
-    and products.id = (storage.foldername(storage.objects.name))[2]::bigint
+    where stores.id = public.kafka_storage_segment_id(
+      (storage.foldername(storage.objects.name))[1]
+    )
+    and products.id = case
+      when (storage.foldername(storage.objects.name))[2] = 'products'
+        then public.kafka_storage_segment_id((storage.foldername(storage.objects.name))[3])
+      else public.kafka_storage_segment_id((storage.foldername(storage.objects.name))[2])
+    end
     and stores.owner_user_id = auth.uid()
   )
 );
@@ -79,8 +105,14 @@ using (
     select 1
     from public.stores
     join public.products on products.store_id = stores.id
-    where stores.id = (storage.foldername(storage.objects.name))[1]::bigint
-    and products.id = (storage.foldername(storage.objects.name))[2]::bigint
+    where stores.id = public.kafka_storage_segment_id(
+      (storage.foldername(storage.objects.name))[1]
+    )
+    and products.id = case
+      when (storage.foldername(storage.objects.name))[2] = 'products'
+        then public.kafka_storage_segment_id((storage.foldername(storage.objects.name))[3])
+      else public.kafka_storage_segment_id((storage.foldername(storage.objects.name))[2])
+    end
     and stores.owner_user_id = auth.uid()
   )
 );

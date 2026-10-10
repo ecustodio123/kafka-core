@@ -15,6 +15,11 @@ dist-ssr
 .env.*
 !.env.example
 
+# Local migration artifacts and rollback files
+migration-backups/
+*.csv
+*.tsv
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

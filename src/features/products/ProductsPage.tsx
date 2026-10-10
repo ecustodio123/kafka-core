@@ -8,8 +8,6 @@ import {
   Pencil,
   ImagePlus,
   Plus,
-  Power,
-  PowerOff,
   RefreshCw,
   Save,
   X,
@@ -18,23 +16,23 @@ import {
   getProductImageUrl,
   uploadProductImage,
 } from '../../services/productImages'
+import { listCategories } from '../../services/categories'
 import {
   createProduct,
   getProducts,
-  setProductActive,
   setProductAvailability,
   setProductImagePath,
   updateProduct,
   type ProductFormInput,
 } from '../../services/products'
-import type { Product, Store } from '../../types/database'
+import type { Category, Product, Store } from '../../types/database'
 
 type FormState = {
   name: string
   description: string
   price: string
+  category_id: string
   available: boolean
-  active: boolean
 }
 
 type Notice = {
@@ -46,8 +44,8 @@ const emptyForm: FormState = {
   name: '',
   description: '',
   price: '',
+  category_id: '',
   available: true,
-  active: true,
 }
 
 const currencyFormatter = new Intl.NumberFormat('es-PE', {
@@ -57,6 +55,7 @@ const currencyFormatter = new Intl.NumberFormat('es-PE', {
 
 export function ProductsPage({ store }: { store: Store }) {
   const [products, setProducts] = useState<Product[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [actionProductId, setActionProductId] = useState<Product['id'] | null>(
@@ -73,7 +72,12 @@ export function ProductsPage({ store }: { store: Store }) {
     try {
       setLoading(true)
       setError(null)
-      setProducts(await getProducts(store.id))
+      const [nextProducts, nextCategories] = await Promise.all([
+        getProducts(store.id),
+        listCategories(store.id),
+      ])
+      setProducts(nextProducts)
+      setCategories(nextCategories)
     } catch (caughtError) {
       setError(getErrorMessage(caughtError))
     } finally {
@@ -87,11 +91,6 @@ export function ProductsPage({ store }: { store: Store }) {
   useEffect(() => {
     void loadProducts()
   }, [loadProducts])
-
-  const activeCount = useMemo(
-    () => products.filter((product) => product.active).length,
-    [products],
-  )
 
   const availableCount = useMemo(
     () => products.filter((product) => product.available).length,
@@ -112,8 +111,8 @@ export function ProductsPage({ store }: { store: Store }) {
       name: product.name,
       description: product.description ?? '',
       price: String(product.price),
+      category_id: product.category_id ?? '',
       available: product.available,
-      active: product.active,
     })
     setImageFile(null)
     setIsFormOpen(true)
@@ -151,7 +150,9 @@ export function ProductsPage({ store }: { store: Store }) {
       if (imageFile) {
         const imagePath = await uploadProductImage({
           file: imageFile,
+          productName: savedProduct.name,
           productId: savedProduct.id,
+          storeSlug: store.slug,
           storeId: store.id,
         })
         savedProduct = await setProductImagePath(
@@ -205,23 +206,6 @@ export function ProductsPage({ store }: { store: Store }) {
     })
   }
 
-  async function handleActiveChange(product: Product) {
-    await runProductAction(product.id, async () => {
-      const updatedProduct = await setProductActive(
-        store.id,
-        product.id,
-        !product.active,
-      )
-      replaceProduct(updatedProduct)
-      setNotice({
-        type: 'success',
-        message: updatedProduct.active
-          ? 'Producto reactivado correctamente.'
-          : 'Producto desactivado correctamente.',
-      })
-    })
-  }
-
   async function runProductAction(
     productId: Product['id'],
     action: () => Promise<void>,
@@ -269,9 +253,8 @@ export function ProductsPage({ store }: { store: Store }) {
         </button>
       </div>
 
-      <div className="mb-5 grid gap-3 sm:grid-cols-3">
+      <div className="mb-5 grid gap-3 sm:grid-cols-2">
         <Metric label="Productos" value={products.length} />
-        <Metric label="Activos" value={activeCount} />
         <Metric label="Disponibles" value={availableCount} />
       </div>
 
@@ -283,6 +266,8 @@ export function ProductsPage({ store }: { store: Store }) {
           isEditing={Boolean(editingProduct)}
           saving={saving}
           setForm={setForm}
+          categories={categories}
+          editingProduct={editingProduct}
           imageFile={imageFile}
           onImageChange={setImageFile}
           onCancel={closeForm}
@@ -332,8 +317,8 @@ export function ProductsPage({ store }: { store: Store }) {
         ) : (
           <ProductTable
             actionProductId={actionProductId}
+            categories={categories}
             products={products}
-            onActiveChange={handleActiveChange}
             onAvailabilityChange={handleAvailabilityChange}
             onEdit={openEditForm}
           />
@@ -348,6 +333,8 @@ function ProductForm({
   isEditing,
   saving,
   setForm,
+  categories,
+  editingProduct,
   imageFile,
   onImageChange,
   onCancel,
@@ -357,6 +344,8 @@ function ProductForm({
   isEditing: boolean
   saving: boolean
   setForm: Dispatch<SetStateAction<FormState>>
+  categories: Category[]
+  editingProduct: Product | null
   imageFile: File | null
   onImageChange: (file: File | null) => void
   onCancel: () => void
@@ -431,6 +420,30 @@ function ProductForm({
           />
         </Field>
 
+        <Field label="Categoria" htmlFor="product-category">
+          <select
+            className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-slate-900 focus:ring-2 focus:ring-slate-200"
+            id="product-category"
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                category_id: event.target.value,
+              }))
+            }
+            value={form.category_id}
+          >
+            <option value="">Sin categoria</option>
+            {getSelectableCategories(categories, editingProduct).map(
+              (category) => (
+                <option key={category.id} value={category.id}>
+                  {category.name}
+                  {category.active ? '' : ' (inactiva)'}
+                </option>
+              ),
+            )}
+          </select>
+        </Field>
+
         <Field label="Imagen" htmlFor="product-image">
           <div className="rounded-md border border-dashed border-slate-300 px-3 py-3">
             <label
@@ -474,13 +487,6 @@ function ProductForm({
               setForm((current) => ({ ...current, available }))
             }
           />
-          <Toggle
-            checked={form.active}
-            label={form.active ? 'Activo' : 'Inactivo'}
-            onChange={(active) =>
-              setForm((current) => ({ ...current, active }))
-            }
-          />
         </div>
       </div>
 
@@ -511,32 +517,36 @@ function ProductForm({
 
 function ProductTable({
   actionProductId,
+  categories,
   products,
-  onActiveChange,
   onAvailabilityChange,
   onEdit,
 }: {
   actionProductId: Product['id'] | null
+  categories: Category[]
   products: Product[]
-  onActiveChange: (product: Product) => void
   onAvailabilityChange: (product: Product) => void
   onEdit: (product: Product) => void
 }) {
+  const categoryById = new Map(
+    categories.map((category) => [category.id, category]),
+  )
+
   return (
     <div className="overflow-x-auto">
       <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
         <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
           <tr>
             <th className="px-4 py-3">Producto</th>
+            <th className="px-4 py-3">Categoria</th>
             <th className="px-4 py-3">Precio</th>
             <th className="px-4 py-3">Disponibilidad</th>
-            <th className="px-4 py-3">Estado</th>
             <th className="px-4 py-3 text-right">Acciones</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100 bg-white">
           {products.map((product) => (
-            <tr key={product.id} className={!product.active ? 'bg-slate-50' : ''}>
+            <tr key={product.id}>
               <td className="max-w-md px-4 py-4">
                 <div className="flex items-center gap-3">
                   <ProductImage product={product} />
@@ -548,6 +558,9 @@ function ProductTable({
                   </div>
                 </div>
               </td>
+              <td className="px-4 py-4">
+                <CategoryLabel category={categoryById.get(product.category_id ?? '')} />
+              </td>
               <td className="whitespace-nowrap px-4 py-4 font-medium text-slate-800">
                 {currencyFormatter.format(product.price)}
               </td>
@@ -555,12 +568,6 @@ function ProductTable({
                 <StatusPill
                   tone={product.available ? 'green' : 'amber'}
                   text={product.available ? 'Disponible' : 'Agotado'}
-                />
-              </td>
-              <td className="px-4 py-4">
-                <StatusPill
-                  tone={product.active ? 'blue' : 'slate'}
-                  text={product.active ? 'Activo' : 'Inactivo'}
                 />
               </td>
               <td className="px-4 py-4">
@@ -582,21 +589,6 @@ function ProductTable({
                   >
                     <CheckCircle2 aria-hidden="true" size={16} />
                   </IconButton>
-                  <IconButton
-                    label={
-                      product.active
-                        ? 'Desactivar producto'
-                        : 'Reactivar producto'
-                    }
-                    loading={actionProductId === product.id}
-                    onClick={() => onActiveChange(product)}
-                  >
-                    {product.active ? (
-                      <PowerOff aria-hidden="true" size={16} />
-                    ) : (
-                      <Power aria-hidden="true" size={16} />
-                    )}
-                  </IconButton>
                 </div>
               </td>
             </tr>
@@ -604,6 +596,19 @@ function ProductTable({
         </tbody>
       </table>
     </div>
+  )
+}
+
+function CategoryLabel({ category }: { category: Category | undefined }) {
+  if (!category) {
+    return <span className="text-sm text-slate-500">Sin categoria</span>
+  }
+
+  return (
+    <span className="inline-flex min-h-7 items-center rounded-md bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+      {category.name}
+      {category.active ? '' : ' (inactiva)'}
+    </span>
   )
 }
 
@@ -788,10 +793,27 @@ function parseForm(
       name,
       description,
       price,
+      category_id: form.category_id || null,
       available: form.available,
-      active: form.active,
     },
   }
+}
+
+function getSelectableCategories(
+  categories: Category[],
+  editingProduct: Product | null,
+) {
+  const inactiveSelectedCategory = categories.find(
+    (category) => category.id === editingProduct?.category_id,
+  )
+
+  const activeCategories = categories.filter((category) => category.active)
+
+  if (inactiveSelectedCategory && !inactiveSelectedCategory.active) {
+    return [...activeCategories, inactiveSelectedCategory]
+  }
+
+  return activeCategories
 }
 
 function getErrorMessage(error: unknown) {

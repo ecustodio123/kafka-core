@@ -1,11 +1,21 @@
 import { useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
-import { AlertCircle, Boxes, Loader2, LogOut, Package } from 'lucide-react'
+import {
+  AlertCircle,
+  Boxes,
+  FolderTree,
+  Loader2,
+  LogOut,
+  Package,
+} from 'lucide-react'
 import { AuthPage } from './features/auth/AuthPage'
+import { CategoriesPage } from './features/categories/CategoriesPage'
 import { ProductsPage } from './features/products/ProductsPage'
 import { getSupabaseClient, hasSupabaseConfig } from './lib/supabase'
 import { getCurrentUserStore } from './services/stores'
 import type { Store } from './types/database'
+
+type AdminSection = 'products' | 'categories'
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
@@ -13,6 +23,7 @@ function App() {
   const [loadingSession, setLoadingSession] = useState(hasSupabaseConfig)
   const [loadingStore, setLoadingStore] = useState(false)
   const [storeError, setStoreError] = useState<string | null>(null)
+  const [activeSection, setActiveSection] = useState<AdminSection>('products')
 
   useEffect(() => {
     if (!hasSupabaseConfig) {
@@ -146,13 +157,30 @@ function App() {
       <div className="grid min-h-[calc(100vh-4rem)] grid-cols-1 lg:grid-cols-[240px_1fr]">
         <aside className="border-b border-slate-200 bg-white px-4 py-3 lg:border-b-0 lg:border-r lg:px-5 lg:py-6">
           <nav aria-label="Modulos de Kafka Admin">
-            <a
-              className="flex items-center gap-3 rounded-md bg-slate-950 px-3 py-2.5 text-sm font-medium text-white"
-              href="#productos"
+            <button
+              className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm font-medium transition ${
+                activeSection === 'products'
+                  ? 'bg-slate-950 text-white'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+              onClick={() => setActiveSection('products')}
+              type="button"
             >
               <Package aria-hidden="true" size={18} />
               Productos
-            </a>
+            </button>
+            <button
+              className={`mt-2 flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm font-medium transition ${
+                activeSection === 'categories'
+                  ? 'bg-slate-950 text-white'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+              onClick={() => setActiveSection('categories')}
+              type="button"
+            >
+              <FolderTree aria-hidden="true" size={18} />
+              Categorias
+            </button>
           </nav>
         </aside>
 
@@ -161,8 +189,10 @@ function App() {
             <PanelState text="Buscando la tienda asociada a tu usuario..." />
           ) : storeError ? (
             <PanelState icon="error" text={storeError} />
-          ) : store ? (
+          ) : store && activeSection === 'products' ? (
             <ProductsPage store={store} />
+          ) : store && activeSection === 'categories' ? (
+            <CategoriesPage store={store} />
           ) : (
             <PanelState
               icon="error"

@@ -7,14 +7,14 @@ import type {
 } from '../types/database'
 
 const PRODUCT_COLUMNS =
-  'id, store_id, name, description, price, image_path, available, active, created_at'
+  'id, store_id, name, description, price, image_path, category_id, available, active, created_at'
 
 export type ProductFormInput = {
   name: string
   description: string
   price: number
+  category_id: string | null
   available: boolean
-  active: boolean
 }
 
 export async function getProducts(storeId: Store['id']): Promise<Product[]> {
@@ -41,8 +41,9 @@ export async function createProduct(
     description: input.description || null,
     price: input.price,
     image_path: null,
+    category_id: input.category_id,
     available: input.available,
-    active: input.active,
+    active: true,
   }
 
   const { data, error } = await getSupabaseClient()
@@ -67,8 +68,8 @@ export async function updateProduct(
     name: input.name,
     description: input.description || null,
     price: input.price,
+    category_id: input.category_id,
     available: input.available,
-    active: input.active,
   }
 
   const { data, error } = await getSupabaseClient()
@@ -92,14 +93,6 @@ export async function setProductAvailability(
   available: boolean,
 ): Promise<Product> {
   return updateProductField(storeId, productId, { available })
-}
-
-export async function setProductActive(
-  storeId: Store['id'],
-  productId: Product['id'],
-  active: boolean,
-): Promise<Product> {
-  return updateProductField(storeId, productId, { active })
 }
 
 export async function setProductImagePath(

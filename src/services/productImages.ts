@@ -1,7 +1,10 @@
 import { getSupabaseClient } from '../lib/supabase'
+import { convertImageToWebp, validateImageFile } from './imageProcessing'
+import { slugifyPathSegment } from './pathSlugs'
 import type { Product, Store } from '../types/database'
 
 const PRODUCT_IMAGES_BUCKET = 'product-images'
+const MAX_PRODUCT_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
 
 export function getProductImageUrl(imagePath: string) {
   const { data } = getSupabaseClient()
@@ -14,15 +17,25 @@ export function getProductImageUrl(imagePath: string) {
 
 export async function uploadProductImage({
   file,
+  productName,
   productId,
+  storeSlug,
   storeId,
 }: {
   file: File
+  productName: Product['name']
   productId: Product['id']
+  storeSlug: Store['slug']
   storeId: Store['id']
 }) {
+  validateImageFile(file, MAX_PRODUCT_IMAGE_SIZE_BYTES)
   const imageBlob = await convertImageToWebp(file)
-  const imagePath = `${storeId}/${productId}/image.webp`
+  const imagePath = [
+    `${storeId}-${slugifyPathSegment(storeSlug)}`,
+    'products',
+    `${productId}-${slugifyPathSegment(productName)}`,
+    `principal-${Date.now()}.webp`,
+  ].join('/')
 
   const { error } = await getSupabaseClient()
     .storage
@@ -38,56 +51,4 @@ export async function uploadProductImage({
   }
 
   return imagePath
-}
-
-async function convertImageToWebp(file: File): Promise<Blob> {
-  if (!file.type.startsWith('image/')) {
-    throw new Error('Selecciona un archivo de imagen valido.')
-  }
-
-  const image = await loadImage(file)
-  const canvas = document.createElement('canvas')
-  canvas.width = image.naturalWidth
-  canvas.height = image.naturalHeight
-
-  const context = canvas.getContext('2d')
-  if (!context) {
-    throw new Error('No se pudo preparar la imagen para subirla.')
-  }
-
-  context.drawImage(image, 0, 0)
-
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => {
-        if (!blob) {
-          reject(new Error('No se pudo convertir la imagen a WebP.'))
-          return
-        }
-
-        resolve(blob)
-      },
-      'image/webp',
-      0.86,
-    )
-  })
-}
-
-function loadImage(file: File): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const image = new Image()
-    const imageUrl = URL.createObjectURL(file)
-
-    image.onload = () => {
-      URL.revokeObjectURL(imageUrl)
-      resolve(image)
-    }
-
-    image.onerror = () => {
-      URL.revokeObjectURL(imageUrl)
-      reject(new Error('No se pudo leer la imagen seleccionada.'))
-    }
-
-    image.src = imageUrl
-  })
 }
