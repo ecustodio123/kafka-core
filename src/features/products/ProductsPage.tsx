@@ -10,6 +10,8 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Star,
+  Tag,
   X,
 } from 'lucide-react'
 import {
@@ -31,6 +33,9 @@ type FormState = {
   name: string
   description: string
   price: string
+  discount_active: boolean
+  discount_price: string
+  visual_rating: string
   category_id: string
   available: boolean
 }
@@ -44,6 +49,9 @@ const emptyForm: FormState = {
   name: '',
   description: '',
   price: '',
+  discount_active: false,
+  discount_price: '',
+  visual_rating: '5',
   category_id: '',
   available: true,
 }
@@ -97,6 +105,11 @@ export function ProductsPage({ store }: { store: Store }) {
     [products],
   )
 
+  const offerCount = useMemo(
+    () => products.filter((product) => hasActiveDiscount(product)).length,
+    [products],
+  )
+
   function openCreateForm() {
     setEditingProduct(null)
     setForm(emptyForm)
@@ -111,6 +124,13 @@ export function ProductsPage({ store }: { store: Store }) {
       name: product.name,
       description: product.description ?? '',
       price: String(product.price),
+      discount_active: product.discount_active,
+      discount_price: product.discount_price === null
+        ? ''
+        : String(product.discount_price),
+      visual_rating: product.visual_rating === null
+        ? '5'
+        : String(product.visual_rating),
       category_id: product.category_id ?? '',
       available: product.available,
     })
@@ -253,9 +273,10 @@ export function ProductsPage({ store }: { store: Store }) {
         </button>
       </div>
 
-      <div className="mb-5 grid gap-3 sm:grid-cols-2">
+      <div className="mb-5 grid gap-3 sm:grid-cols-3">
         <Metric label="Productos" value={products.length} />
         <Metric label="Disponibles" value={availableCount} />
+        <Metric label="En oferta" value={offerCount} />
       </div>
 
       {notice ? <NoticeBanner notice={notice} /> : null}
@@ -444,6 +465,8 @@ function ProductForm({
           </select>
         </Field>
 
+        <DiscountFields form={form} setForm={setForm} />
+
         <Field label="Imagen" htmlFor="product-image">
           <div className="rounded-md border border-dashed border-slate-300 px-3 py-3">
             <label
@@ -480,6 +503,35 @@ function ProductForm({
         </Field>
 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+          <Field label="Calificacion visual" htmlFor="product-rating">
+            <div className="rounded-md border border-slate-300 px-3 py-2">
+              <div className="flex items-center gap-2">
+                <Star
+                  aria-hidden="true"
+                  className="fill-amber-400 text-amber-400"
+                  size={17}
+                />
+                <input
+                  className="w-full text-sm outline-none"
+                  id="product-rating"
+                  max="5"
+                  min="0"
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      visual_rating: event.target.value,
+                    }))
+                  }
+                  step="0.1"
+                  type="number"
+                  value={form.visual_rating}
+                />
+              </div>
+              <p className="mt-1 text-xs text-slate-500">
+                Valor administrado por el negocio, de 0 a 5.
+              </p>
+            </div>
+          </Field>
           <Toggle
             checked={form.available}
             label={form.available ? 'Disponible' : 'Agotado'}
@@ -515,6 +567,98 @@ function ProductForm({
   )
 }
 
+function DiscountFields({
+  form,
+  setForm,
+}: {
+  form: FormState
+  setForm: Dispatch<SetStateAction<FormState>>
+}) {
+  const price = Number(form.price)
+  const discountPrice = Number(form.discount_price)
+  const canPreview =
+    form.discount_active &&
+    Number.isFinite(price) &&
+    price > 0 &&
+    Number.isFinite(discountPrice) &&
+    discountPrice > 0 &&
+    discountPrice < price
+
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 p-3 lg:col-span-2">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+            <Tag aria-hidden="true" size={16} />
+            Oferta del producto
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            El precio original se conserva; el precio final se calcula con la
+            promocion activa.
+          </p>
+        </div>
+        <Toggle
+          checked={form.discount_active}
+          label={form.discount_active ? 'Oferta activa' : 'Sin oferta'}
+          onChange={(discountActive) =>
+            setForm((current) => ({
+              ...current,
+              discount_active: discountActive,
+            }))
+          }
+        />
+      </div>
+
+      <div className="mt-3 grid gap-3 md:grid-cols-[220px_1fr]">
+        <Field label="Precio promocional" htmlFor="product-discount-price">
+          <input
+            className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-slate-900 focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100 disabled:text-slate-500"
+            disabled={!form.discount_active}
+            id="product-discount-price"
+            min="0"
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                discount_price: event.target.value,
+              }))
+            }
+            placeholder="99.90"
+            step="0.01"
+            type="number"
+            value={form.discount_price}
+          />
+        </Field>
+
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+          <p className="text-xs font-medium uppercase text-slate-500">
+            Vista previa
+          </p>
+          {canPreview ? (
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <span className="text-sm text-slate-400 line-through">
+                {currencyFormatter.format(price)}
+              </span>
+              <span className="text-lg font-semibold text-slate-950">
+                {currencyFormatter.format(discountPrice)}
+              </span>
+              <StatusPill
+                tone="rose"
+                text={`-${getDiscountPercent(price, discountPrice)}%`}
+              />
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-slate-500">
+              {form.discount_active
+                ? 'Ingresa un precio mayor que cero y menor al precio original.'
+                : 'Se usara el precio original.'}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ProductTable({
   actionProductId,
   categories,
@@ -540,6 +684,7 @@ function ProductTable({
             <th className="px-4 py-3">Producto</th>
             <th className="px-4 py-3">Categoria</th>
             <th className="px-4 py-3">Precio</th>
+            <th className="px-4 py-3">Calificacion</th>
             <th className="px-4 py-3">Disponibilidad</th>
             <th className="px-4 py-3 text-right">Acciones</th>
           </tr>
@@ -561,8 +706,11 @@ function ProductTable({
               <td className="px-4 py-4">
                 <CategoryLabel category={categoryById.get(product.category_id ?? '')} />
               </td>
-              <td className="whitespace-nowrap px-4 py-4 font-medium text-slate-800">
-                {currencyFormatter.format(product.price)}
+              <td className="whitespace-nowrap px-4 py-4">
+                <ProductPrice product={product} />
+              </td>
+              <td className="px-4 py-4">
+                <RatingStars value={product.visual_rating} />
               </td>
               <td className="px-4 py-4">
                 <StatusPill
@@ -595,6 +743,56 @@ function ProductTable({
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+function ProductPrice({ product }: { product: Product }) {
+  if (!hasActiveDiscount(product)) {
+    return (
+      <span className="font-medium text-slate-800">
+        {currencyFormatter.format(product.price)}
+      </span>
+    )
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <span className="font-semibold text-slate-950">
+          {currencyFormatter.format(product.discount_price ?? product.price)}
+        </span>
+        <StatusPill
+          tone="rose"
+          text={`-${getDiscountPercent(product.price, product.discount_price ?? product.price)}%`}
+        />
+      </div>
+      <p className="mt-1 text-xs text-slate-400 line-through">
+        {currencyFormatter.format(product.price)}
+      </p>
+    </div>
+  )
+}
+
+function RatingStars({ value }: { value: Product['visual_rating'] }) {
+  const rating = clampRating(value ?? 0)
+
+  return (
+    <div className="flex items-center gap-1" aria-label={`${rating} de 5`}>
+      {Array.from({ length: 5 }, (_, index) => {
+        const filled = rating >= index + 0.5
+        return (
+          <Star
+            aria-hidden="true"
+            className={filled ? 'fill-amber-400 text-amber-400' : 'text-slate-300'}
+            key={index}
+            size={15}
+          />
+        )
+      })}
+      <span className="ml-1 text-xs font-medium text-slate-500">
+        {rating.toFixed(1)}
+      </span>
     </div>
   )
 }
@@ -726,12 +924,13 @@ function StatusPill({
   tone,
 }: {
   text: string
-  tone: 'amber' | 'blue' | 'green' | 'slate'
+  tone: 'amber' | 'blue' | 'green' | 'rose' | 'slate'
 }) {
   const toneClass = {
     amber: 'bg-amber-50 text-amber-800 ring-amber-200',
     blue: 'bg-blue-50 text-blue-800 ring-blue-200',
     green: 'bg-emerald-50 text-emerald-800 ring-emerald-200',
+    rose: 'bg-rose-50 text-rose-700 ring-rose-200',
     slate: 'bg-slate-100 text-slate-700 ring-slate-200',
   }[tone]
 
@@ -779,6 +978,10 @@ function parseForm(
   const name = form.name.trim()
   const description = form.description.trim()
   const price = Number(form.price)
+  const discountPrice = form.discount_price
+    ? Number(form.discount_price)
+    : null
+  const visualRating = Number(form.visual_rating)
 
   if (!name) {
     return { error: 'Ingresa el nombre del producto.' }
@@ -788,15 +991,72 @@ function parseForm(
     return { error: 'Ingresa un precio valido mayor o igual a cero.' }
   }
 
+  if (form.discount_active) {
+    if (
+      discountPrice === null ||
+      !Number.isFinite(discountPrice) ||
+      discountPrice <= 0
+    ) {
+      return { error: 'Ingresa un precio promocional mayor que cero.' }
+    }
+
+    if (discountPrice >= price) {
+      return {
+        error: 'El precio promocional debe ser menor que el precio original.',
+      }
+    }
+  }
+
+  if (
+    discountPrice !== null &&
+    (!Number.isFinite(discountPrice) || discountPrice <= 0 || discountPrice >= price)
+  ) {
+    return {
+      error: 'Si guardas un precio promocional, debe ser mayor que cero y menor que el precio original.',
+    }
+  }
+
+  if (!Number.isFinite(visualRating) || visualRating < 0 || visualRating > 5) {
+    return { error: 'La calificacion visual debe estar entre 0 y 5.' }
+  }
+
   return {
     value: {
       name,
       description,
       price,
+      discount_active: form.discount_active,
+      discount_price: discountPrice,
+      visual_rating: roundToOneDecimal(visualRating),
       category_id: form.category_id || null,
       available: form.available,
     },
   }
+}
+
+function hasActiveDiscount(product: Product) {
+  return Boolean(
+    product.discount_active &&
+      product.discount_price !== null &&
+      product.discount_price > 0 &&
+      product.discount_price < product.price,
+  )
+}
+
+function getDiscountPercent(originalPrice: number, discountPrice: number) {
+  if (originalPrice <= 0 || discountPrice >= originalPrice) {
+    return 0
+  }
+
+  return Math.round(((originalPrice - discountPrice) / originalPrice) * 100)
+}
+
+function clampRating(value: number) {
+  return Math.min(5, Math.max(0, value))
+}
+
+function roundToOneDecimal(value: number) {
+  return Math.round(value * 10) / 10
 }
 
 function getSelectableCategories(

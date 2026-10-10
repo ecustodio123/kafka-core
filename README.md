@@ -67,9 +67,21 @@ Las imagenes nuevas de categorias se guardan con rutas descriptivas:
 
 `categories.image_url` guarda la URL publica completa. Las URLs antiguas siguen funcionando mientras el objeto original exista.
 
-6. Crea un usuario desde Supabase Auth. Kafka Admin no permite registro publico.
+6. Ejecuta el SQL de ofertas y calificacion visual cuando quieras habilitar
+   descuentos por producto:
 
-7. Asocia ese usuario a una tienda:
+```text
+supabase/migrations/202610100001_add_product_offers_rating.sql
+```
+
+Ese script agrega `discount_active`, `discount_price` y `visual_rating` a
+`products`, crea restricciones de integridad, indices para filtros/ordenamiento
+y una vista `kafka_commerce_products` con `final_price`,
+`discount_percent` e `in_offer` calculados.
+
+7. Crea un usuario desde Supabase Auth. Kafka Admin no permite registro publico.
+
+8. Asocia ese usuario a una tienda:
 
 ```sql
 update public.stores
@@ -77,7 +89,7 @@ set owner_user_id = 'USER_ID_DE_AUTH'
 where id = 1;
 ```
 
-8. Ejecuta el proyecto:
+9. Ejecuta el proyecto:
 
 ```bash
 npm run dev
@@ -103,11 +115,23 @@ La pantalla de productos permite:
 - leer productos filtrados por la tienda asociada al usuario autenticado
 - crear productos asociados automaticamente a esa tienda
 - editar nombre, descripcion, precio y disponibilidad
+- activar/desactivar oferta sin modificar el precio original
+- guardar precio promocional y calificacion visual de 0 a 5
 - asignar una categoria o dejar el producto sin categoria
 - subir una imagen por producto a Supabase Storage
 - alternar Disponible/Agotado usando `available`
 
 No hay eliminacion fisica en esta fase. Los productos nuevos se crean internamente con `active = true`; el negocio solo gestiona Disponible/Agotado.
+
+El precio final vigente para Commerce se calcula asi:
+
+```text
+discount_active && discount_price > 0 && discount_price < price
+  ? discount_price
+  : price
+```
+
+`visual_rating` es una calificacion visual administrada por el negocio. No representa opiniones verificadas ni cantidad de reseñas.
 
 ## Categorias
 
@@ -139,6 +163,7 @@ El orden publico se controla con `sort_order`. Si una categoria esta inactiva, s
 - `supabase/phase-6-auth-rls.sql`: SQL para Auth/RLS de esta fase.
 - `supabase/phase-7-storage.sql`: SQL para Storage e imagenes de producto.
 - `supabase/phase-7-3-category-images.sql`: SQL para Storage e imagenes de categoria.
+- `supabase/migrations/202610100001_add_product_offers_rating.sql`: SQL para descuentos, rating visual, filtros e indices de catalogo.
 - `supabase/product-images-migration-plan.md`: plan seguro para migrar rutas antiguas de imagenes de producto sin ejecutarlo automaticamente.
 - `supabase/category-images-migration-plan.md`: plan seguro para migrar rutas antiguas de imagenes de categorias sin ejecutarlo automaticamente.
 - `scripts/migrate-product-images.mjs`: migracion controlada de rutas antiguas de productos, con `dry-run`, verificacion y backup.

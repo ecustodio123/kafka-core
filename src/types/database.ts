@@ -4,6 +4,9 @@ export type Product = {
   name: string
   description: string | null
   price: number
+  discount_active: boolean
+  discount_price: number | null
+  visual_rating: number | null
   image_path: string | null
   category_id: string | null
   available: boolean
@@ -16,6 +19,9 @@ export type ProductInsert = {
   name: string
   description?: string | null
   price: number
+  discount_active?: boolean
+  discount_price?: number | null
+  visual_rating?: number | null
   image_path?: string | null
   category_id?: string | null
   available: boolean
@@ -28,6 +34,9 @@ export type ProductUpdate = Partial<
     | 'name'
     | 'description'
     | 'price'
+    | 'discount_active'
+    | 'discount_price'
+    | 'visual_rating'
     | 'image_path'
     | 'category_id'
     | 'available'

@@ -7,12 +7,15 @@ import type {
 } from '../types/database'
 
 const PRODUCT_COLUMNS =
-  'id, store_id, name, description, price, image_path, category_id, available, active, created_at'
+  'id, store_id, name, description, price, discount_active, discount_price, visual_rating, image_path, category_id, available, active, created_at'
 
 export type ProductFormInput = {
   name: string
   description: string
   price: number
+  discount_active: boolean
+  discount_price: number | null
+  visual_rating: number | null
   category_id: string | null
   available: boolean
 }
@@ -40,6 +43,9 @@ export async function createProduct(
     name: input.name,
     description: input.description || null,
     price: input.price,
+    discount_active: input.discount_active,
+    discount_price: input.discount_price,
+    visual_rating: input.visual_rating,
     image_path: null,
     category_id: input.category_id,
     available: input.available,
@@ -68,6 +74,9 @@ export async function updateProduct(
     name: input.name,
     description: input.description || null,
     price: input.price,
+    discount_active: input.discount_active,
+    discount_price: input.discount_price,
+    visual_rating: input.visual_rating,
     category_id: input.category_id,
     available: input.available,
   }
