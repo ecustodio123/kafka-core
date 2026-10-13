@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test:create-order": "node --test scripts/create-order.integration.test.mjs",
     "migrate:category-images": "node scripts/migrate-category-images.mjs",
     "migrate:product-images": "node scripts/migrate-product-images.mjs",
     "preview": "vite preview"
