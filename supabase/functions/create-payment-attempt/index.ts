@@ -7,6 +7,7 @@ type CreatePaymentAttemptPayload = {
   idempotency_key?: unknown;
   source_id?: unknown;
   payment_session_token?: unknown;
+  device_finger_print_id?: unknown;
 };
 
 type ValidatedPayload = {
@@ -15,6 +16,7 @@ type ValidatedPayload = {
   idempotencyKey: string;
   sourceId: string;
   paymentSessionToken: string | null;
+  deviceFingerPrintId: string | null;
 };
 
 type PaymentMode = "mock" | "culqi_test";
@@ -40,6 +42,9 @@ type PaymentAttemptResponse = {
   failure_code: string | null;
   failure_message: string | null;
   provider_reference: string | null;
+  requires_3ds?: boolean;
+  three_ds_status?: string | null;
+  reconciliation_required?: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -96,6 +101,7 @@ const MAX_BODY_BYTES = 2048;
 const MAX_IDEMPOTENCY_LENGTH = 120;
 const MAX_SOURCE_ID_LENGTH = 120;
 const MAX_PAYMENT_SESSION_TOKEN_LENGTH = 256;
+const MAX_DEVICE_FINGER_PRINT_LENGTH = 64;
 const MIN_TEST_RUNNER_SECRET_LENGTH = 32;
 const DEFAULT_CULQI_CHARGES_URL = "https://api.culqi.com/v2/charges";
 const DEFAULT_CULQI_TIMEOUT_MS = 8000;
@@ -117,6 +123,8 @@ const TEST_ORDER_EMAIL = "payments-integration-test@example.com";
 const TEST_ORDER_MARKER = "Kafka Payments 3B integration test -";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DEVICE_FINGER_PRINT_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TEST_SOURCE_PATTERN = /^(tkn|ype|crd)_test_[A-Za-z0-9]+$/;
 const FORBIDDEN_CLIENT_FIELDS = new Set([
   "amount",
@@ -414,6 +422,14 @@ async function processCulqiTestPaymentAttempt(
     );
   }
 
+  if (!payload.deviceFingerPrintId) {
+    return jsonResponse(
+      { error: "device_finger_print_id requerido para pago con tarjeta." },
+      400,
+      corsHeaders,
+    );
+  }
+
   const culqiChargesUrl = readCulqiChargesUrl(dependencies.env);
   const culqiTimeoutMs = readTimeoutMs(dependencies.env);
   const paymentSessionTokenHash = await sha256Hex(payload.paymentSessionToken);
@@ -556,6 +572,7 @@ async function processCulqiTestPaymentAttempt(
     storeId: payload.storeId,
     timeoutMs: culqiTimeoutMs,
     paymentAttemptId: processingAttempt.id,
+    deviceFingerPrintId: payload.deviceFingerPrintId,
   });
 
   if (culqiResponse.kind === "success") {
@@ -630,6 +647,39 @@ async function processCulqiTestPaymentAttempt(
     );
   }
 
+  if (culqiResponse.kind === "requires_3ds") {
+    const mark3dsResult = await supabase.rpc(
+      "mark_kafka_payment_attempt_requires_3ds",
+      {
+        p_store_id: payload.storeId,
+        p_payment_attempt_id: processingAttempt.id,
+        p_device_fingerprint_id: payload.deviceFingerPrintId,
+        p_provider_reference: culqiResponse.providerReference,
+        p_sanitized_payload: culqiResponse.sanitizedPayload,
+      },
+    );
+
+    if (mark3dsResult.error) {
+      return jsonResponse(
+        { error: getSafeDatabaseError(mark3dsResult.error.message) },
+        getStatusForDatabaseError(mark3dsResult.error.message),
+        corsHeaders,
+      );
+    }
+
+    return paymentAttemptJsonResponse(
+      mark3dsResult.data as PaymentAttemptResponse,
+      {
+        mode: "culqi_test",
+        processed: true,
+        reason: "culqi_requires_3ds",
+        requires_3ds: true,
+      },
+      202,
+      corsHeaders,
+    );
+  }
+
   return paymentAttemptJsonResponse(
     processingAttempt,
     {
@@ -689,6 +739,7 @@ function validatePayload(
         "idempotency_key",
         "source_id",
         "payment_session_token",
+        "device_finger_print_id",
       ].includes(field)
     ) {
       throw new Error(`${field} no esta permitido.`);
@@ -716,9 +767,21 @@ function validatePayload(
     "payment_session_token",
     MAX_PAYMENT_SESSION_TOKEN_LENGTH,
   );
+  const deviceFingerPrintId = parseOptionalString(
+    payload.device_finger_print_id,
+    "device_finger_print_id",
+    MAX_DEVICE_FINGER_PRINT_LENGTH,
+  );
 
   if (!TEST_SOURCE_PATTERN.test(sourceId)) {
     throw new Error("source_id Culqi TEST invalido.");
+  }
+
+  if (
+    deviceFingerPrintId !== null &&
+    !DEVICE_FINGER_PRINT_PATTERN.test(deviceFingerPrintId)
+  ) {
+    throw new Error("device_finger_print_id invalido.");
   }
 
   return {
@@ -727,6 +790,7 @@ function validatePayload(
     idempotencyKey,
     sourceId,
     paymentSessionToken,
+    deviceFingerPrintId,
   };
 }
 
@@ -810,6 +874,11 @@ type CulqiChargeResult =
     sanitizedPayload: Record<string, unknown>;
   }
   | {
+    kind: "requires_3ds";
+    providerReference: string | null;
+    sanitizedPayload: Record<string, unknown>;
+  }
+  | {
     kind: "uncertain";
     reason: string;
   };
@@ -826,6 +895,7 @@ async function createCulqiCharge({
   sourceId,
   storeId,
   timeoutMs,
+  deviceFingerPrintId,
 }: {
   amountCents: number;
   chargesUrl: string;
@@ -838,6 +908,7 @@ async function createCulqiCharge({
   sourceId: string;
   storeId: number;
   timeoutMs: number;
+  deviceFingerPrintId: string;
 }): Promise<CulqiChargeResult> {
   if (!/^sk_test_[A-Za-z0-9]+$/.test(privateKey)) {
     throw new Error("Configuracion de pagos invalida.");
@@ -860,6 +931,9 @@ async function createCulqiCharge({
         email,
         source_id: sourceId,
         capture: true,
+        antifraud_details: {
+          device_finger_print_id: deviceFingerPrintId,
+        },
         description: `Kafka order ${orderId}`,
         metadata: {
           kafka_order_id: orderId,
@@ -877,7 +951,7 @@ async function createCulqiCharge({
 
     const body = await safeReadJson(response);
 
-    if (response.status === 201) {
+    if (response.status === 200) {
       const chargeId = typeof body?.id === "string" ? body.id : "";
 
       if (!/^chr_test_[A-Za-z0-9]+$/.test(chargeId)) {
@@ -895,8 +969,17 @@ async function createCulqiCharge({
       };
     }
 
-    if (response.status === 200) {
-      return { kind: "uncertain", reason: "culqi_requires_action" };
+    if (response.status === 201) {
+      const providerReference = sanitizeCulqiString(body?.id) || null;
+      return {
+        kind: "requires_3ds",
+        providerReference,
+        sanitizedPayload: {
+          culqi_status: response.status,
+          object: sanitizeCulqiString(body?.object),
+          requires_3ds: true,
+        },
+      };
     }
 
     if (response.status === 400 || response.status === 402) {
@@ -1330,6 +1413,8 @@ function getSafeDatabaseError(message: string) {
     "pagos Culqi TEST no configurados para la tienda",
     "transicion de intento de pago invalida",
     "intento de pago inconsistente con la orden",
+    "device fingerprint invalido",
+    "payload sanitizado invalido",
   ];
 
   if (

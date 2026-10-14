@@ -13,6 +13,8 @@
     "test:create-payment-attempt:mock": "node --test scripts/create-payment-attempt.mock.test.mjs",
     "test:create-payment-attempt:mock:unit": "npx -y deno@latest test --allow-env supabase/functions/create-payment-attempt/index_test.ts",
     "test:payments:3c2:flow": "npx -y deno@latest test --allow-env supabase/functions/payments_3c2_flow_test.ts",
+    "test:payments:3ds:rpc-contract": "node --test scripts/payment-3ds-rpc.contract.test.mjs",
+    "test:get-order-payment-status:unit": "npx -y deno@latest test --allow-env supabase/functions/get-order-payment-status/index_test.ts",
     "test:get-payment-config": "node --test scripts/get-payment-config.integration.test.mjs",
     "test:payment-claim": "node --test scripts/payment-claim.integration.test.mjs",
     "test:payment-attempts": "node --test scripts/payment-attempts.integration.test.mjs",

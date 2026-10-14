@@ -8,11 +8,12 @@ import { createHandler as createPaymentAttemptHandler } from "./create-payment-a
 const ORIGIN = "http://localhost:5173";
 const STORE_ID = 1;
 const NOW = new Date("2026-10-13T12:00:00.000Z");
+const DEVICE_FINGER_PRINT_ID = "8019959c-fab1-49eb-bbbe-b846d308d8df";
 
 Deno.test("3C.2 integrated flow creates an online order, hashes session token and finalizes paid", async () => {
   const fake = createIntegratedSupabase();
   const fetch = createFakeFetch({
-    status: 201,
+    status: 200,
     body: { id: "chr_test_integratedpaid", object: "charge" },
   });
   const orderResponse = await createOnlineOrder(fake, "order-success");
@@ -61,7 +62,8 @@ Deno.test("3C.2 integrated flow finalizes definitive Culqi rejection", async () 
       type: "card_error",
     },
   });
-  const orderBody = await (await createOnlineOrder(fake, "order-rejected")).json();
+  const orderBody = await (await createOnlineOrder(fake, "order-rejected"))
+    .json();
 
   const response = await createPaymentAttempt(
     fake,
@@ -80,9 +82,10 @@ Deno.test("3C.2 integrated flow finalizes definitive Culqi rejection", async () 
 
 Deno.test("3C.2 integrated flow rejects invalid and expired sessions before Culqi", async () => {
   const invalidFake = createIntegratedSupabase();
-  const invalidFetch = createFakeFetch({ status: 201 });
-  const invalidOrder = await (await createOnlineOrder(invalidFake, "order-invalid-session"))
-    .json();
+  const invalidFetch = createFakeFetch({ status: 200 });
+  const invalidOrder =
+    await (await createOnlineOrder(invalidFake, "order-invalid-session"))
+      .json();
 
   const invalidResponse = await createPaymentAttempt(
     invalidFake,
@@ -96,9 +99,10 @@ Deno.test("3C.2 integrated flow rejects invalid and expired sessions before Culq
   assertEquals(invalidFetch.calls.length, 0);
 
   const expiredFake = createIntegratedSupabase();
-  const expiredFetch = createFakeFetch({ status: 201 });
-  const expiredOrder = await (await createOnlineOrder(expiredFake, "order-expired-session"))
-    .json();
+  const expiredFetch = createFakeFetch({ status: 200 });
+  const expiredOrder =
+    await (await createOnlineOrder(expiredFake, "order-expired-session"))
+      .json();
   expiredFake.expireSessions();
 
   const expiredResponse = await createPaymentAttempt(
@@ -116,8 +120,9 @@ Deno.test("3C.2 integrated flow rejects invalid and expired sessions before Culq
 Deno.test("3C.2 integrated flow keeps timeout and 3DS responses in processing", async () => {
   const timeoutFake = createIntegratedSupabase();
   const timeoutFetch = createFakeFetch({ rejectsWithAbort: true });
-  const timeoutOrder = await (await createOnlineOrder(timeoutFake, "order-timeout"))
-    .json();
+  const timeoutOrder =
+    await (await createOnlineOrder(timeoutFake, "order-timeout"))
+      .json();
 
   const timeoutResponse = await createPaymentAttempt(
     timeoutFake,
@@ -133,7 +138,10 @@ Deno.test("3C.2 integrated flow keeps timeout and 3DS responses in processing", 
   assertEquals(timeoutBody.payment_result.requires_reconciliation, true);
 
   const threeDsFake = createIntegratedSupabase();
-  const threeDsFetch = createFakeFetch({ status: 200, body: { object: "charge" } });
+  const threeDsFetch = createFakeFetch({
+    status: 201,
+    body: { object: "charge" },
+  });
   const threeDsOrder = await (await createOnlineOrder(threeDsFake, "order-3ds"))
     .json();
 
@@ -148,12 +156,14 @@ Deno.test("3C.2 integrated flow keeps timeout and 3DS responses in processing", 
 
   assertEquals(threeDsResponse.status, 202);
   assertEquals(threeDsBody.payment_attempt.status, "processing");
-  assertEquals(threeDsBody.payment_result.reason, "culqi_requires_action");
+  assertEquals(threeDsBody.payment_attempt.requires_3ds, true);
+  assertEquals(threeDsBody.payment_attempt.three_ds_status, "required");
+  assertEquals(threeDsBody.payment_result.reason, "culqi_requires_3ds");
 });
 
 Deno.test("3C.2 integrated flow does not create a second charge for duplicate processing attempts", async () => {
   const fake = createIntegratedSupabase();
-  const fetch = createFakeFetch({ status: 200, body: { object: "charge" } });
+  const fetch = createFakeFetch({ status: 201, body: { object: "charge" } });
   const orderBody = await (await createOnlineOrder(fake, "order-idempotent"))
     .json();
 
@@ -259,6 +269,7 @@ async function createPaymentAttempt(
         idempotency_key: idempotencyKey,
         source_id: "tkn_test_integratedsource",
         payment_session_token: paymentSessionToken,
+        device_finger_print_id: DEVICE_FINGER_PRINT_ID,
       }),
       headers: {
         "Content-Type": "application/json",
@@ -269,7 +280,10 @@ async function createPaymentAttempt(
   );
 }
 
-function createOrderPayload(idempotencyKey: string, checkoutMode: "online" | "whatsapp") {
+function createOrderPayload(
+  idempotencyKey: string,
+  checkoutMode: "online" | "whatsapp",
+) {
   return {
     store_id: STORE_ID,
     items: [{ product_id: 1, quantity: 2 }],
@@ -321,6 +335,9 @@ function createIntegratedSupabase() {
       failure_code: attempt.failure_code ?? null,
       failure_message: attempt.failure_message ?? null,
       provider_reference: attempt.provider_reference ?? null,
+      requires_3ds: attempt.requires_3ds ?? false,
+      three_ds_status: attempt.three_ds_status ?? null,
+      reconciliation_required: attempt.reconciliation_required ?? false,
       created_at: "2026-10-13T12:00:00.000Z",
       updated_at: "2026-10-13T12:00:00.000Z",
     };
@@ -329,7 +346,11 @@ function createIntegratedSupabase() {
   function reserveAttempt(args: Record<string, unknown>) {
     const order = orders.get(String(args.p_order_id));
     if (!order) {
-      return { data: null, error: { message: "orden invalida" }, existing: false };
+      return {
+        data: null,
+        error: { message: "orden invalida" },
+        existing: false,
+      };
     }
 
     const existing = attempts.get(String(args.p_idempotency_key));
@@ -362,7 +383,11 @@ function createIntegratedSupabase() {
     }
 
     if (order.status === "paid") {
-      return { data: null, error: { message: "orden ya pagada" }, existing: false };
+      return {
+        data: null,
+        error: { message: "orden ya pagada" },
+        existing: false,
+      };
     }
 
     if (order.status === "payment_failed") {
@@ -425,7 +450,10 @@ function createIntegratedSupabase() {
           total_amount_cents: 2000,
         };
         orders.set(String(order.id), order);
-        orderIdsByIdempotencyKey.set(String(args.p_idempotency_key), String(order.id));
+        orderIdsByIdempotencyKey.set(
+          String(args.p_idempotency_key),
+          String(order.id),
+        );
         sessions.set(String(args.p_payment_session_token_hash), {
           order_id: order.id,
           store_id: order.store_id,
@@ -564,7 +592,30 @@ function createIntegratedSupabase() {
         attempt.failure_code = args.p_failure_code;
         attempt.failure_message = args.p_failure_message;
         attempt.provider_reference = args.p_provider_reference;
-        order.status = args.p_final_status === "paid" ? "paid" : "payment_failed";
+        order.status = args.p_final_status === "paid"
+          ? "paid"
+          : "payment_failed";
+
+        return { data: attemptResponse(order, attempt), error: null };
+      }
+
+      if (name === "mark_kafka_payment_attempt_requires_3ds") {
+        const attempt = Array.from(attempts.values()).find((item) =>
+          item.id === args.p_payment_attempt_id
+        );
+        const order = attempt ? orders.get(String(attempt.order_id)) : null;
+
+        if (!attempt || !order || attempt.status !== "processing") {
+          return {
+            data: null,
+            error: { message: "intento de pago inconsistente con la orden" },
+          };
+        }
+
+        attempt.requires_3ds = true;
+        attempt.three_ds_status = "required";
+        attempt.provider_reference = args.p_provider_reference;
+        attempt.reconciliation_required = false;
 
         return { data: attemptResponse(order, attempt), error: null };
       }
@@ -620,8 +671,12 @@ function createFakeFetch({
   rejectsWithAbort?: boolean;
   status?: number;
 }) {
-  const calls: Array<{ input: string | URL | Request; init?: RequestInit }> = [];
-  const fakeFetch = async (input: string | URL | Request, init?: RequestInit) => {
+  const calls: Array<{ input: string | URL | Request; init?: RequestInit }> =
+    [];
+  const fakeFetch = async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
     calls.push({ input, init });
 
     if (rejectsWithAbort) {
@@ -644,8 +699,9 @@ async function sha256Hex(value: string) {
     new TextEncoder().encode(value),
   );
 
-  return Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0")
+  return Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, "0"),
   ).join("");
 }
 

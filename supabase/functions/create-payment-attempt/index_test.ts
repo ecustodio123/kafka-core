@@ -8,6 +8,7 @@ const STORE_ID = 1;
 const ORIGIN = "http://localhost:5173";
 const SECRET = "mock-test-runner-secret-with-at-least-32-chars";
 const ORDER_ID = "11111111-1111-4111-8111-111111111111";
+const DEVICE_FINGER_PRINT_ID = "8019959c-fab1-49eb-bbbe-b846d308d8df";
 
 Deno.test("MOCK success reserves, processes and finalizes paid", async () => {
   const fake = createFakeSupabase();
@@ -117,7 +118,7 @@ Deno.test("MOCK allows a new attempt after definitive rejection", async () => {
   const handler = createHandler({
     createSupabaseClient: () => fake,
     env: (name) => env[name],
-    fetch: createFakeFetch({ status: 201 }),
+    fetch: createFakeFetch({ status: 200 }),
   });
 
   const failedResponse = await post(handler, {
@@ -174,7 +175,7 @@ Deno.test("CULQI_TEST success validates session, charges once and finalizes paid
     whatsapp_message: "normal commerce order",
   });
   const fetch = createFakeFetch({
-    status: 201,
+    status: 200,
     body: { id: "chr_test_paid123", object: "charge" },
   });
   const handler = createTestHandler(fake, {
@@ -192,6 +193,11 @@ Deno.test("CULQI_TEST success validates session, charges once and finalizes paid
   assertEquals(body.payment_result.reason, "culqi_charge_paid");
   assertEquals(fetch.calls.length, 1);
   assertEquals(fetch.calls[0].input, "https://api.culqi.com/v2/charges");
+  const requestBody = JSON.parse(String(fetch.calls[0].init?.body));
+  assertEquals(
+    requestBody.antifraud_details.device_finger_print_id,
+    DEVICE_FINGER_PRINT_ID,
+  );
   const headers = fetch.calls[0].init?.headers as Record<string, string>;
   assertEquals(
     headers.Authorization,
@@ -267,6 +273,31 @@ Deno.test("CULQI_TEST ambiguous Culqi error keeps processing", async () => {
   );
 });
 
+Deno.test("CULQI_TEST 200 without charge id stays processing for reconciliation", async () => {
+  const fake = createFakeSupabase({
+    customer_email: "buyer@example.com",
+    whatsapp_message: "normal commerce order",
+  });
+  const fetch = createFakeFetch({ status: 200, body: { object: "charge" } });
+  const handler = createTestHandler(fake, {
+    CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+    CREATE_PAYMENT_ATTEMPT_MOCK_ENABLED: "false",
+  }, fetch);
+  const response = await post(handler, {
+    payment_session_token: "payment-session-token",
+  });
+  const body = await response.json();
+
+  assertEquals(response.status, 202);
+  assertEquals(body.payment_attempt.status, "processing");
+  assertEquals(body.payment_result.reason, "culqi_success_without_charge_id");
+  assertEquals(
+    fake.calls.filter((call) => call.name === "finalize_kafka_payment_attempt")
+      .length,
+    0,
+  );
+});
+
 Deno.test("CULQI_TEST invalid private key fails before claim and HTTP call", async () => {
   const fake = createFakeSupabase(
     {
@@ -275,7 +306,7 @@ Deno.test("CULQI_TEST invalid private key fails before claim and HTTP call", asy
     },
     { privateKey: "invalid-key" },
   );
-  const fetch = createFakeFetch({ status: 201 });
+  const fetch = createFakeFetch({ status: 200 });
   const handler = createTestHandler(fake, {
     CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
     CREATE_PAYMENT_ATTEMPT_MOCK_ENABLED: "false",
@@ -301,7 +332,7 @@ Deno.test("CULQI_TEST rejects non official Culqi endpoint before reserve", async
     customer_email: "buyer@example.com",
     whatsapp_message: "normal commerce order",
   });
-  const fetch = createFakeFetch({ status: 201 });
+  const fetch = createFakeFetch({ status: 200 });
   const handler = createTestHandler(fake, {
     CREATE_PAYMENT_ATTEMPT_CULQI_CHARGES_URL: "https://example.test/v2/charges",
     CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
@@ -343,12 +374,15 @@ Deno.test("CULQI_TEST timeout keeps processing for reconciliation", async () => 
   );
 });
 
-Deno.test("CULQI_TEST 3DS response keeps processing without finalizing paid", async () => {
+Deno.test("CULQI_TEST 201 3DS response persists 3DS metadata without finalizing paid", async () => {
   const fake = createFakeSupabase({
     customer_email: "buyer@example.com",
     whatsapp_message: "normal commerce order",
   });
-  const fetch = createFakeFetch({ status: 200, body: { object: "charge" } });
+  const fetch = createFakeFetch({
+    status: 201,
+    body: { id: "chr_test_requires3ds", object: "charge" },
+  });
   const handler = createTestHandler(fake, {
     CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
     CREATE_PAYMENT_ATTEMPT_MOCK_ENABLED: "false",
@@ -360,12 +394,49 @@ Deno.test("CULQI_TEST 3DS response keeps processing without finalizing paid", as
 
   assertEquals(response.status, 202);
   assertEquals(body.payment_attempt.status, "processing");
-  assertEquals(body.payment_result.reason, "culqi_requires_action");
+  assertEquals(body.payment_attempt.requires_3ds, true);
+  assertEquals(body.payment_attempt.three_ds_status, "required");
+  assertEquals(body.payment_result.reason, "culqi_requires_3ds");
   assertEquals(
     fake.calls.filter((call) => call.name === "finalize_kafka_payment_attempt")
       .length,
     0,
   );
+  assertEquals(
+    fake.calls.filter((call) =>
+      call.name === "mark_kafka_payment_attempt_requires_3ds"
+    ).length,
+    1,
+  );
+  assertEquals(
+    fake.calls.find((call) =>
+      call.name === "mark_kafka_payment_attempt_requires_3ds"
+    )?.args.p_device_fingerprint_id,
+    DEVICE_FINGER_PRINT_ID,
+  );
+  assertNoSensitiveValues(body);
+});
+
+Deno.test("CULQI_TEST requires device fingerprint before reserve and HTTP call", async () => {
+  const fake = createFakeSupabase({
+    customer_email: "buyer@example.com",
+    whatsapp_message: "normal commerce order",
+  });
+  const fetch = createFakeFetch({ status: 200 });
+  const handler = createTestHandler(fake, {
+    CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+    CREATE_PAYMENT_ATTEMPT_MOCK_ENABLED: "false",
+  }, fetch);
+  const response = await post(handler, {
+    device_finger_print_id: null,
+    payment_session_token: "payment-session-token",
+  });
+  const body = await response.json();
+
+  assertEquals(response.status, 400);
+  assertMatch(body.error, /device_finger_print_id/i);
+  assertEquals(fetch.calls.length, 0);
+  assertEquals(fake.calls.length, 0);
 });
 
 Deno.test("CULQI_TEST only acquired claim can call Culqi", async () => {
@@ -376,7 +447,7 @@ Deno.test("CULQI_TEST only acquired claim can call Culqi", async () => {
     },
     { claimAcquired: false },
   );
-  const fetch = createFakeFetch({ status: 201 });
+  const fetch = createFakeFetch({ status: 200 });
   const handler = createTestHandler(fake, {
     CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
     CREATE_PAYMENT_ATTEMPT_MOCK_ENABLED: "false",
@@ -399,7 +470,7 @@ Deno.test("CULQI_TEST requires a valid payment session before claim", async () =
     },
     { sessionValid: false },
   );
-  const fetch = createFakeFetch({ status: 201 });
+  const fetch = createFakeFetch({ status: 200 });
   const handler = createTestHandler(fake, {
     CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
     CREATE_PAYMENT_ATTEMPT_MOCK_ENABLED: "false",
@@ -429,7 +500,7 @@ Deno.test("CULQI_TEST rejects revoked payment sessions before claim", async () =
     },
     { sessionRevoked: true },
   );
-  const fetch = createFakeFetch({ status: 201 });
+  const fetch = createFakeFetch({ status: 200 });
   const handler = createTestHandler(fake, {
     CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
     CREATE_PAYMENT_ATTEMPT_MOCK_ENABLED: "false",
@@ -459,7 +530,7 @@ Deno.test("CULQI_TEST rejects expired payment sessions before claim", async () =
     },
     { sessionExpired: true },
   );
-  const fetch = createFakeFetch({ status: 201 });
+  const fetch = createFakeFetch({ status: 200 });
   const handler = createTestHandler(fake, {
     CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
     CREATE_PAYMENT_ATTEMPT_MOCK_ENABLED: "false",
@@ -530,7 +601,7 @@ Deno.test("CULQI_TEST concurrent duplicate requests do not create a second charg
 function createTestHandler(
   fake: ReturnType<typeof createFakeSupabase>,
   overrides = {},
-  fetch = createFakeFetch({ status: 201 }),
+  fetch = createFakeFetch({ status: 200 }),
 ) {
   const env = createEnv(overrides);
 
@@ -564,6 +635,7 @@ async function post(
         order_id: ORDER_ID,
         idempotency_key: "attempt-key",
         source_id: "tkn_test_sourcesafe",
+        device_finger_print_id: DEVICE_FINGER_PRINT_ID,
         ...payloadOverrides,
       }),
       headers: {
@@ -616,6 +688,9 @@ function createFakeSupabase(
       failure_code: attempt.failure_code ?? null,
       failure_message: attempt.failure_message ?? null,
       provider_reference: attempt.provider_reference ?? null,
+      requires_3ds: attempt.requires_3ds ?? false,
+      three_ds_status: attempt.three_ds_status ?? null,
+      reconciliation_required: attempt.reconciliation_required ?? false,
       created_at: "2026-10-13T00:00:00.000Z",
       updated_at: "2026-10-13T00:00:00.000Z",
     };
@@ -834,6 +909,24 @@ function createFakeSupabase(
         order.status = args.p_final_status === "paid"
           ? "paid"
           : "payment_failed";
+        return { data: attemptResponse(attempt), error: null };
+      }
+
+      if (name === "mark_kafka_payment_attempt_requires_3ds") {
+        const attempt = Array.from(attempts.values()).find((item) =>
+          item.id === args.p_payment_attempt_id
+        );
+        if (!attempt || attempt.status !== "processing") {
+          return {
+            data: null,
+            error: { message: "intento de pago inconsistente con la orden" },
+          };
+        }
+
+        attempt.requires_3ds = true;
+        attempt.three_ds_status = "required";
+        attempt.provider_reference = args.p_provider_reference;
+        attempt.reconciliation_required = false;
         return { data: attemptResponse(attempt), error: null };
       }
 
