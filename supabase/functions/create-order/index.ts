@@ -12,6 +12,7 @@ type CreateOrderPayload = {
   customer?: unknown
   idempotency_key?: unknown
   whatsapp_message?: unknown
+  checkout_mode?: unknown
 }
 
 type CustomerInput = {
@@ -28,6 +29,24 @@ type ValidatedPayload = {
   customerEmail: string | null
   idempotencyKey: string
   whatsappMessage: string | null
+  checkoutMode: CheckoutMode
+}
+
+type CheckoutMode = 'online' | 'whatsapp'
+
+type SupabaseResult<T> = {
+  data: T | null
+  error: { message: string } | null
+}
+
+type SupabaseLike = {
+  rpc: (name: string, args: Record<string, unknown>) => Promise<SupabaseResult<unknown>>
+}
+
+type HandlerDependencies = {
+  createSupabaseClient: () => SupabaseLike | null
+  env: (name: string) => string | undefined
+  now: () => Date
 }
 
 const MAX_BODY_BYTES = 16 * 1024
@@ -38,63 +57,94 @@ const MAX_NAME_LENGTH = 120
 const MAX_PHONE_LENGTH = 32
 const MAX_EMAIL_LENGTH = 180
 const MAX_WHATSAPP_MESSAGE_LENGTH = 4000
+const PAYMENT_SESSION_TTL_MS = 15 * 60 * 1000
 const EMAIL_PATTERN = new RegExp(
   "^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$",
 )
 
-const allowedOrigins = parseAllowedOrigins(
-  Deno.env.get('CREATE_ORDER_ALLOWED_ORIGINS') ?? '',
-)
-
-serve(async (request) => {
-  const origin = request.headers.get('origin')
-  const corsHeaders = getCorsHeaders(origin)
-
-  if (request.method === 'OPTIONS') {
-    return new Response(null, {
-      headers: corsHeaders,
-      status: corsHeaders ? 204 : 403,
-    })
-  }
-
-  if (!corsHeaders) {
-    return jsonResponse({ error: 'Origin no permitido.' }, 403)
-  }
-
-  if (request.method !== 'POST') {
-    return jsonResponse(
-      { error: 'Metodo no permitido.' },
-      405,
-      corsHeaders,
-      { Allow: 'POST, OPTIONS' },
+export function createHandler(dependencies: HandlerDependencies) {
+  return async (request: Request) => {
+    const origin = request.headers.get('origin')
+    const allowedOrigins = parseAllowedOrigins(
+      dependencies.env('CREATE_ORDER_ALLOWED_ORIGINS') ?? '',
     )
-  }
+    const corsHeaders = getCorsHeaders(origin, allowedOrigins)
 
-  const contentType = request.headers.get('content-type') ?? ''
-  if (!contentType.toLowerCase().includes('application/json')) {
-    return jsonResponse(
-      { error: 'El contenido debe ser application/json.' },
-      415,
-      corsHeaders,
-    )
-  }
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: corsHeaders ?? undefined,
+        status: corsHeaders ? 204 : 403,
+      })
+    }
 
-  try {
-    const rawBody = await readLimitedBody(request, MAX_BODY_BYTES)
-    const payload = validatePayload(JSON.parse(rawBody) as CreateOrderPayload)
+    if (!corsHeaders) {
+      return jsonResponse({ error: 'Origin no permitido.' }, 403)
+    }
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')
-    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-
-    if (!supabaseUrl || !serviceRoleKey) {
+    if (request.method !== 'POST') {
       return jsonResponse(
-        { error: 'Configuracion de servidor incompleta.' },
-        500,
+        { error: 'Metodo no permitido.' },
+        405,
+        corsHeaders,
+        { Allow: 'POST, OPTIONS' },
+      )
+    }
+
+    const contentType = request.headers.get('content-type') ?? ''
+    if (!contentType.toLowerCase().includes('application/json')) {
+      return jsonResponse(
+        { error: 'El contenido debe ser application/json.' },
+        415,
         corsHeaders,
       )
     }
 
-    const supabase = createClient(supabaseUrl, serviceRoleKey, {
+    try {
+      const rawBody = await readLimitedBody(request, MAX_BODY_BYTES)
+      const payload = validatePayload(JSON.parse(rawBody) as CreateOrderPayload)
+
+      const supabase = dependencies.createSupabaseClient()
+      if (!supabase) {
+        return jsonResponse(
+          { error: 'Configuracion de servidor incompleta.' },
+          500,
+          corsHeaders,
+        )
+      }
+
+      const orderResult = payload.checkoutMode === 'online'
+        ? await createOnlineOrder(supabase, payload, dependencies.now)
+        : await createWhatsappOrder(supabase, payload)
+
+      if (orderResult.error) {
+        return jsonResponse(
+          { error: getSafeDatabaseError(orderResult.error.message) },
+          getStatusForDatabaseError(orderResult.error.message),
+          corsHeaders,
+        )
+      }
+
+      return jsonResponse(orderResult.body, 201, corsHeaders)
+    } catch (error) {
+      return jsonResponse(
+        { error: error instanceof Error ? error.message : 'Solicitud invalida.' },
+        400,
+        corsHeaders,
+      )
+    }
+  }
+}
+
+const defaultDependencies: HandlerDependencies = {
+  createSupabaseClient: () => {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+
+    if (!supabaseUrl || !serviceRoleKey) {
+      return null
+    }
+
+    return createClient(supabaseUrl, serviceRoleKey, {
       auth: {
         persistSession: false,
         autoRefreshToken: false,
@@ -104,35 +154,17 @@ serve(async (request) => {
           'X-Client-Info': 'kafka-payments-create-order',
         },
       },
-    })
+    }) as unknown as SupabaseLike
+  },
+  env: (name: string) => Deno.env.get(name) ?? undefined,
+  now: () => new Date(),
+}
 
-    const { data, error } = await supabase.rpc('create_kafka_order', {
-      p_store_id: payload.storeId,
-      p_customer_name: payload.customerName,
-      p_customer_phone: payload.customerPhone,
-      p_customer_email: payload.customerEmail,
-      p_idempotency_key: payload.idempotencyKey,
-      p_whatsapp_message: payload.whatsappMessage,
-      p_items: payload.items,
-    })
+export const handler = createHandler(defaultDependencies)
 
-    if (error) {
-      return jsonResponse(
-        { error: getSafeDatabaseError(error.message) },
-        getStatusForDatabaseError(error.message),
-        corsHeaders,
-      )
-    }
-
-    return jsonResponse({ order: data }, 201, corsHeaders)
-  } catch (error) {
-    return jsonResponse(
-      { error: error instanceof Error ? error.message : 'Solicitud invalida.' },
-      400,
-      corsHeaders,
-    )
-  }
-})
+if (import.meta.main) {
+  serve(handler)
+}
 
 function validatePayload(payload: CreateOrderPayload): ValidatedPayload {
   if (!payload || typeof payload !== 'object') {
@@ -161,6 +193,7 @@ function validatePayload(payload: CreateOrderPayload): ValidatedPayload {
     'whatsapp_message',
     MAX_WHATSAPP_MESSAGE_LENGTH,
   )
+  const checkoutMode = parseCheckoutMode(payload.checkout_mode)
 
   return {
     storeId,
@@ -170,7 +203,71 @@ function validatePayload(payload: CreateOrderPayload): ValidatedPayload {
     customerEmail: customer.email,
     idempotencyKey,
     whatsappMessage,
+    checkoutMode,
   }
+}
+
+async function createOnlineOrder(
+  supabase: SupabaseLike,
+  payload: ValidatedPayload,
+  now: () => Date,
+) {
+  const paymentSessionToken = createPaymentSessionToken()
+  const paymentSessionTokenHash = await sha256Hex(paymentSessionToken)
+  const expiresAt = new Date(now().getTime() + PAYMENT_SESSION_TTL_MS)
+
+  const { data, error } = await supabase.rpc(
+    'create_kafka_online_order_with_payment_session',
+    {
+      p_store_id: payload.storeId,
+      p_customer_name: payload.customerName,
+      p_customer_phone: payload.customerPhone,
+      p_customer_email: payload.customerEmail,
+      p_idempotency_key: payload.idempotencyKey,
+      p_whatsapp_message: payload.whatsappMessage,
+      p_items: payload.items,
+      p_payment_session_token_hash: paymentSessionTokenHash,
+      p_payment_session_expires_at: expiresAt.toISOString(),
+    },
+  )
+
+  if (error) {
+    return { body: {}, error }
+  }
+
+  const result = data as {
+    order: unknown
+    payment_session_created?: boolean
+    payment_session?: { expires_at?: string }
+  }
+  const body: Record<string, unknown> = { order: result.order }
+
+  if (result.payment_session_created === true) {
+    body.payment_session = {
+      token: paymentSessionToken,
+      expires_at: result.payment_session?.expires_at ?? expiresAt.toISOString(),
+    }
+  }
+
+  return { body, error: null }
+}
+
+async function createWhatsappOrder(supabase: SupabaseLike, payload: ValidatedPayload) {
+  const { data, error } = await supabase.rpc('create_kafka_order', {
+    p_store_id: payload.storeId,
+    p_customer_name: payload.customerName,
+    p_customer_phone: payload.customerPhone,
+    p_customer_email: payload.customerEmail,
+    p_idempotency_key: payload.idempotencyKey,
+    p_whatsapp_message: payload.whatsappMessage,
+    p_items: payload.items,
+  })
+
+  if (error) {
+    return { body: {}, error }
+  }
+
+  return { body: { order: data }, error: null }
 }
 
 function normalizeItems(items: OrderItemInput[]) {
@@ -215,6 +312,45 @@ function validateCustomer(value: unknown) {
   }
 
   return { name, phone, email }
+}
+
+function parseCheckoutMode(value: unknown): CheckoutMode {
+  if (value === undefined || value === null || value === '') {
+    return 'online'
+  }
+
+  if (value !== 'online' && value !== 'whatsapp') {
+    throw new Error('checkout_mode debe ser online o whatsapp.')
+  }
+
+  return value
+}
+
+function createPaymentSessionToken() {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return base64UrlEncode(bytes)
+}
+
+function base64UrlEncode(bytes: Uint8Array) {
+  let binary = ''
+
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte)
+  }
+
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value),
+  )
+
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, '0')
+  ).join('')
 }
 
 function parsePositiveInteger(value: unknown, field: string) {
@@ -310,7 +446,7 @@ function parseAllowedOrigins(value: string) {
     .filter(Boolean)
 }
 
-function getCorsHeaders(origin: string | null) {
+function getCorsHeaders(origin: string | null, allowedOrigins: string[]) {
   if (!origin || allowedOrigins.length === 0 || !allowedOrigins.includes(origin)) {
     return null
   }
@@ -349,7 +485,9 @@ function getStatusForDatabaseError(message: string) {
     message.includes('comprador invalido') ||
     message.includes('whatsapp_message invalido') ||
     message.includes('monto de producto invalido') ||
-    message.includes('total de orden invalido')
+    message.includes('total de orden invalido') ||
+    message.includes('sesion de pago') ||
+    message.includes('expiracion de sesion de pago invalida')
   ) {
     return 400
   }
@@ -372,6 +510,8 @@ function getSafeDatabaseError(message: string) {
     'whatsapp_message invalido',
     'monto de producto invalido',
     'total de orden invalido',
+    'sesion de pago invalida',
+    'expiracion de sesion de pago invalida',
     'idempotency key conflict',
   ]
 
