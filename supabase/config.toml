@@ -1,2 +1,8 @@
 [functions.create-order]
 verify_jwt = false
+
+[functions.get-payment-config]
+verify_jwt = false
+
+[functions.create-payment-attempt]
+verify_jwt = false
