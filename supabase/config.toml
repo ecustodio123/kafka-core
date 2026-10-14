@@ -7,5 +7,8 @@ verify_jwt = false
 [functions.create-payment-attempt]
 verify_jwt = false
 
+[functions.complete-payment-3ds]
+verify_jwt = false
+
 [functions.get-order-payment-status]
 verify_jwt = false
