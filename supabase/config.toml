@@ -12,3 +12,8 @@ verify_jwt = false
 
 [functions.get-order-payment-status]
 verify_jwt = false
+
+# JWT is verified with Auth.getUser inside the handler, then store ownership is checked.
+# No public checkout authorization; independent diagnostic flag defaults to disabled.
+[functions.reconcile-payment-attempt]
+verify_jwt = false
