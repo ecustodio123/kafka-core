@@ -17,6 +17,7 @@
     "test:payments:3ds:rpc-contract": "node --test scripts/payment-3ds-rpc.contract.test.mjs",
     "test:payments:source:rpc-contract": "node --test scripts/payment-attempt-source.contract.test.mjs",
     "test:payments:uncertainty:sql": "node --test scripts/payment-uncertainty.sql.test.mjs",
+    "test:payments:reconciliation:sql": "node --test scripts/payment-reconciliation.sql.test.mjs",
     "test:get-order-payment-status:unit": "npx -y deno@latest test --allow-env supabase/functions/get-order-payment-status/index_test.ts",
     "test:reconcile-payment-attempt:unit": "npx -y deno@latest test --no-lock --allow-env supabase/functions/reconcile-payment-attempt/index_test.ts",
     "test:payments:evidence:unit": "npx -y deno@latest test --no-lock supabase/functions/_shared/culqi-test-evidence_test.ts",
