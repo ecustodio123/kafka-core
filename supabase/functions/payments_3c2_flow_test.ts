@@ -574,6 +574,19 @@ function createIntegratedSupabase() {
         };
       }
 
+      if (name === "record_kafka_payment_attempt_uncertainty") {
+        const attempt = Array.from(attempts.values()).find((item) =>
+          item.id === args.p_payment_attempt_id
+        );
+        const order = attempt ? orders.get(String(attempt.order_id)) : null;
+        if (!attempt || !order) {
+          return { data: null, error: { message: "invalid uncertainty" } };
+        }
+        attempt.reconciliation_required = true;
+        attempt.reconciliation_reason = args.p_reason;
+        return { data: attemptResponse(order, attempt), error: null };
+      }
+
       if (name === "finalize_kafka_payment_attempt") {
         const attempt = Array.from(attempts.values()).find((item) =>
           item.id === args.p_payment_attempt_id

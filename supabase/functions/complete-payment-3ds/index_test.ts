@@ -29,6 +29,16 @@ Deno.test("3DS success validates source, claims once and finalizes paid", async 
   assertEquals(body.payment_attempt.status, "paid");
   assertEquals(body.payment_attempt.order_status, "paid");
   assertEquals(body.payment_result.reason, "culqi_3ds_charge_paid");
+  assertEquals(body.payment_attempt.three_ds_status, "completion_processing");
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  assertEquals(
+    (fake.calls[fake.calls.length - 1].args.p_sanitized_payload as Record<
+      string,
+      unknown
+    >)
+      .three_ds_authenticated,
+    undefined,
+  );
   assertEquals(fetch.calls.length, 1);
   assertEquals(fetch.calls[0].input, "https://api.culqi.com/v2/charges");
 
@@ -71,6 +81,42 @@ Deno.test("3DS definitive rejection finalizes failed only for confirmed card dec
   assertEquals(body.payment_attempt.order_status, "payment_failed");
   assertEquals(body.payment_attempt.failure_code, "insufficient_funds");
   assertEquals(body.payment_result.reason, "culqi_3ds_definitive_failure");
+  assertEquals(body.payment_attempt.three_ds_status, "completion_processing");
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  assertEquals(
+    (fake.calls[fake.calls.length - 1].args.p_sanitized_payload as Record<
+      string,
+      unknown
+    >)
+      .three_ds_authenticated,
+    undefined,
+  );
+  assertNoSensitiveValues(body);
+});
+
+Deno.test("HTTP 200 and browser 3DS data do not prove authentication", async () => {
+  const fake = createFakeSupabase();
+  const fetch = createFakeFetch({
+    status: 200,
+    body: {
+      id: "chr_test_noproof",
+      object: "charge",
+      three_ds_authenticated: true,
+      authentication_3DS: authentication3ds(),
+    },
+  });
+  const response = await post(createTestHandler(fake, fetch), {
+    authentication_3DS: { ...authentication3ds(), eci: "07" },
+  });
+  const body = await response.json();
+  assertEquals(body.payment_attempt.status, "paid");
+  assertEquals(body.payment_attempt.three_ds_status, "completion_processing");
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  const diagnostic = fake.calls[fake.calls.length - 1].args
+    .p_sanitized_payload as Record<string, unknown>;
+  assertEquals(diagnostic.culqi_status, 200);
+  assertEquals("three_ds_authenticated" in diagnostic, false);
+  assertEquals("authentication_3DS" in diagnostic, false);
   assertNoSensitiveValues(body);
 });
 
@@ -381,7 +427,78 @@ function authentication3ds() {
   };
 }
 
+Deno.test("3DS late rejection reports the already-paid database result", async () => {
+  const fake = createFakeSupabase({ finalizeReturnsPaid: true });
+  const fetch = createFakeFetch({
+    status: 402,
+    body: {
+      type: "card_error",
+      code: "card_declined",
+      decline_code: "insufficient_funds",
+    },
+  });
+  const response = await post(createTestHandler(fake, fetch));
+  const body = await response.json();
+  assertEquals(response.status, 200);
+  assertEquals(body.payment_attempt.status, "paid");
+  assertEquals(body.payment_result.reason, "already_finalized");
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  assertEquals(fetch.calls.length, 1);
+});
+
+Deno.test("3DS timeout persistence survives replay without another charge", async () => {
+  const fake = createFakeSupabase();
+  const fetch = createFakeFetch({ rejectsWithAbort: true });
+  const handler = createTestHandler(fake, fetch);
+  const response = await post(handler);
+  const body = await response.json();
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  assertEquals(fake.calls.at(-1)?.args.p_reason, "culqi_3ds_timeout");
+  await post(handler);
+  assertEquals(fetch.calls.length, 1);
+  assertEquals(
+    fake.calls.filter((c) =>
+      c.name === "record_kafka_payment_attempt_uncertainty"
+    ).length,
+    1,
+  );
+});
+
+Deno.test("3DS failed finalization persists the confirmed charge reference", async () => {
+  const fake = createFakeSupabase({ finalizeError: true });
+  const fetch = createFakeFetch({
+    status: 200,
+    body: { id: "chr_test_3dsreference", object: "charge" },
+  });
+  const handler = createTestHandler(fake, fetch);
+  const response = await post(handler);
+  const body = await response.json();
+  assertEquals(response.status, 202);
+  assertEquals(
+    body.payment_attempt.provider_reference,
+    "chr_test_3dsreference",
+  );
+  assertEquals(body.payment_attempt.status, "processing");
+  assertEquals(fake.calls.at(-1)?.args.p_reason, "culqi_3ds_finalize_failed");
+  await post(handler);
+  assertEquals(fetch.calls.length, 1);
+});
+
+Deno.test("3DS persistence failure returns a safe error and does not release the claim", async () => {
+  const fake = createFakeSupabase({ uncertaintyError: true });
+  const fetch = createFakeFetch({ rejectsWithAbort: true });
+  const handler = createTestHandler(fake, fetch);
+  const response = await post(handler);
+  assertEquals(response.status, 503);
+  assertNoSensitiveValues(await response.json());
+  await post(handler);
+  assertEquals(fetch.calls.length, 1);
+});
+
 function createFakeSupabase(options: {
+  uncertaintyError?: boolean;
+  finalizeError?: boolean;
+  finalizeReturnsPaid?: boolean;
   attemptMissing?: boolean;
   attemptStatus?: string;
   sourceValidationResult?: unknown;
@@ -538,7 +655,28 @@ function createFakeSupabase(options: {
         };
       }
 
+      if (name === "record_kafka_payment_attempt_uncertainty") {
+        if (options.uncertaintyError) {
+          return {
+            data: null,
+            error: { message: "TEST persistence unavailable" },
+          };
+        }
+        attempt.reconciliation_required = true;
+        attempt.reconciliation_reason = args.p_reason;
+        if (args.p_provider_reference) {
+          attempt.provider_reference = args.p_provider_reference;
+        }
+        return { data: attemptResponse(), error: null };
+      }
+
       if (name === "finalize_kafka_payment_attempt") {
+        if (options.finalizeError) {
+          return {
+            data: null,
+            error: { message: "TEST finalization unavailable" },
+          };
+        }
         if (attempt.status !== "processing") {
           return {
             data: null,
@@ -546,14 +684,16 @@ function createFakeSupabase(options: {
           };
         }
 
-        attempt.status = String(args.p_final_status);
+        attempt.status = options.finalizeReturnsPaid
+          ? "paid"
+          : String(args.p_final_status);
         attempt.culqi_charge_id = args.p_culqi_charge_id as string | null;
         attempt.failure_code = args.p_failure_code as string | null;
         attempt.failure_message = args.p_failure_message as string | null;
         attempt.provider_reference = args.p_provider_reference as string | null;
-        order.status = args.p_final_status === "paid"
-          ? "paid"
-          : "payment_failed";
+        // Finalizing a charge does not verify the authentication outcome.
+        attempt.reconciliation_required = true;
+        order.status = attempt.status === "paid" ? "paid" : "payment_failed";
         return { data: attemptResponse(), error: null };
       }
 

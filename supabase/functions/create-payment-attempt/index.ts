@@ -347,8 +347,11 @@ async function processMockPaymentAttempt(
   }
 
   if (mockConfig.result === "uncertain") {
-    return paymentAttemptJsonResponse(
+    return await persistUncertaintyResponse(
+      supabase,
+      payload.storeId,
       processingAttempt,
+      "mock_uncertain_response",
       {
         mode: "mock",
         processed: true,
@@ -356,7 +359,6 @@ async function processMockPaymentAttempt(
         result: "uncertain",
         requires_reconciliation: true,
       },
-      202,
       corsHeaders,
     );
   }
@@ -400,10 +402,21 @@ async function processMockPaymentAttempt(
     {
       mode: "mock",
       processed: true,
-      reason: "mock_finalized",
-      result: mockConfig.result,
+      reason:
+        (finalizeResult.data as PaymentAttemptResponse).status === finalStatus
+          ? "mock_finalized"
+          : "already_finalized",
+      result: (finalizeResult.data as PaymentAttemptResponse).status === "paid"
+        ? "success"
+        : (finalizeResult.data as PaymentAttemptResponse).status === "failed"
+        ? "failed"
+        : null,
     },
-    mockConfig.result === "success" ? 201 : 402,
+    (finalizeResult.data as PaymentAttemptResponse).status !== finalStatus
+      ? 200
+      : mockConfig.result === "success"
+      ? 201
+      : 402,
     corsHeaders,
   );
 }
@@ -592,10 +605,19 @@ async function processCulqiTestPaymentAttempt(
     );
 
     if (finalizeResult.error) {
-      return jsonResponse(
-        { error: getSafeDatabaseError(finalizeResult.error.message) },
-        getStatusForDatabaseError(finalizeResult.error.message),
+      return await persistUncertaintyResponse(
+        supabase,
+        payload.storeId,
+        processingAttempt,
+        "culqi_finalize_failed",
+        {
+          mode: "culqi_test",
+          processed: true,
+          reason: "culqi_finalize_failed",
+          requires_reconciliation: true,
+        },
         corsHeaders,
+        culqiResponse.chargeId,
       );
     }
 
@@ -604,9 +626,14 @@ async function processCulqiTestPaymentAttempt(
       {
         mode: "culqi_test",
         processed: true,
-        reason: "culqi_charge_paid",
+        reason:
+          (finalizeResult.data as PaymentAttemptResponse).status !== "paid"
+            ? "already_finalized"
+            : "culqi_charge_paid",
       },
-      201,
+      (finalizeResult.data as PaymentAttemptResponse).status !== "paid"
+        ? 200
+        : 201,
       corsHeaders,
     );
   }
@@ -628,9 +655,17 @@ async function processCulqiTestPaymentAttempt(
     );
 
     if (finalizeResult.error) {
-      return jsonResponse(
-        { error: getSafeDatabaseError(finalizeResult.error.message) },
-        getStatusForDatabaseError(finalizeResult.error.message),
+      return await persistUncertaintyResponse(
+        supabase,
+        payload.storeId,
+        processingAttempt,
+        "culqi_finalize_failed",
+        {
+          mode: "culqi_test",
+          processed: true,
+          reason: "culqi_finalize_failed",
+          requires_reconciliation: true,
+        },
         corsHeaders,
       );
     }
@@ -640,9 +675,14 @@ async function processCulqiTestPaymentAttempt(
       {
         mode: "culqi_test",
         processed: true,
-        reason: "culqi_definitive_failure",
+        reason:
+          (finalizeResult.data as PaymentAttemptResponse).status !== "failed"
+            ? "already_finalized"
+            : "culqi_definitive_failure",
       },
-      402,
+      (finalizeResult.data as PaymentAttemptResponse).status !== "failed"
+        ? 200
+        : 402,
       corsHeaders,
     );
   }
@@ -660,10 +700,21 @@ async function processCulqiTestPaymentAttempt(
     );
 
     if (mark3dsResult.error) {
-      return jsonResponse(
-        { error: getSafeDatabaseError(mark3dsResult.error.message) },
-        getStatusForDatabaseError(mark3dsResult.error.message),
+      return await persistUncertaintyResponse(
+        supabase,
+        payload.storeId,
+        processingAttempt,
+        "culqi_metadata_failed",
+        {
+          mode: "culqi_test",
+          processed: true,
+          reason: "culqi_metadata_failed",
+          requires_reconciliation: true,
+        },
         corsHeaders,
+        /^chr_test_[A-Za-z0-9]+$/.test(culqiResponse.providerReference ?? "")
+          ? culqiResponse.providerReference
+          : null,
       );
     }
 
@@ -680,15 +731,60 @@ async function processCulqiTestPaymentAttempt(
     );
   }
 
-  return paymentAttemptJsonResponse(
+  return await persistUncertaintyResponse(
+    supabase,
+    payload.storeId,
     processingAttempt,
+    culqiResponse.reason,
     {
       mode: "culqi_test",
       processed: true,
       reason: culqiResponse.reason,
       requires_reconciliation: true,
     },
-    202,
+    corsHeaders,
+  );
+}
+
+async function persistUncertaintyResponse(
+  supabase: SupabaseLike,
+  storeId: number,
+  attempt: PaymentAttemptResponse,
+  reason: string,
+  paymentResult: Record<string, unknown>,
+  corsHeaders: Record<string, string>,
+  providerReference: string | null = null,
+) {
+  const result = await supabase.rpc(
+    "record_kafka_payment_attempt_uncertainty",
+    {
+      p_store_id: storeId,
+      p_payment_attempt_id: attempt.id,
+      p_reason: reason,
+      p_provider_reference: providerReference,
+    },
+  );
+  if (result.error || !result.data) {
+    return jsonResponse(
+      {
+        error:
+          "No se pudo registrar el resultado incierto. No repita el cargo.",
+        requires_reconciliation: true,
+      },
+      503,
+      corsHeaders,
+    );
+  }
+  const persisted = result.data as PaymentAttemptResponse;
+  const terminal = persisted.status === "paid" || persisted.status === "failed";
+  return paymentAttemptJsonResponse(
+    persisted,
+    {
+      ...paymentResult,
+      reason: terminal ? "already_finalized" : reason,
+      requires_reconciliation: persisted.reconciliation_required === true,
+    },
+    terminal ? 200 : 202,
     corsHeaders,
   );
 }

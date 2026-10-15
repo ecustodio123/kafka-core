@@ -449,10 +449,13 @@ async function processCompletePayment3ds(
     );
 
     if (finalizeResult.error) {
-      return jsonResponse(
-        { error: getSafeDatabaseError(finalizeResult.error.message) },
-        getStatusForDatabaseError(finalizeResult.error.message),
+      return await persistUncertaintyResponse(
+        supabase,
+        payload.storeId,
+        claimedAttempt,
+        "culqi_3ds_finalize_failed",
         corsHeaders,
+        culqiResponse.chargeId,
       );
     }
 
@@ -461,9 +464,14 @@ async function processCompletePayment3ds(
       {
         mode: "culqi_test_3ds",
         processed: true,
-        reason: "culqi_3ds_charge_paid",
+        reason:
+          (finalizeResult.data as PaymentAttemptResponse).status !== "paid"
+            ? "already_finalized"
+            : "culqi_3ds_charge_paid",
       },
-      201,
+      (finalizeResult.data as PaymentAttemptResponse).status !== "paid"
+        ? 200
+        : 201,
       corsHeaders,
     );
   }
@@ -485,9 +493,11 @@ async function processCompletePayment3ds(
     );
 
     if (finalizeResult.error) {
-      return jsonResponse(
-        { error: getSafeDatabaseError(finalizeResult.error.message) },
-        getStatusForDatabaseError(finalizeResult.error.message),
+      return await persistUncertaintyResponse(
+        supabase,
+        payload.storeId,
+        claimedAttempt,
+        "culqi_3ds_finalize_failed",
         corsHeaders,
       );
     }
@@ -497,22 +507,66 @@ async function processCompletePayment3ds(
       {
         mode: "culqi_test_3ds",
         processed: true,
-        reason: "culqi_3ds_definitive_failure",
+        reason:
+          (finalizeResult.data as PaymentAttemptResponse).status !== "failed"
+            ? "already_finalized"
+            : "culqi_3ds_definitive_failure",
       },
-      402,
+      (finalizeResult.data as PaymentAttemptResponse).status !== "failed"
+        ? 200
+        : 402,
       corsHeaders,
     );
   }
 
-  return paymentAttemptJsonResponse(
+  return await persistUncertaintyResponse(
+    supabase,
+    payload.storeId,
     claimedAttempt,
+    culqiResponse.reason,
+    corsHeaders,
+  );
+}
+
+async function persistUncertaintyResponse(
+  supabase: SupabaseLike,
+  storeId: number,
+  attempt: PaymentAttemptResponse,
+  reason: string,
+  corsHeaders: Record<string, string>,
+  providerReference: string | null = null,
+) {
+  const uncertaintyResult = await supabase.rpc(
+    "record_kafka_payment_attempt_uncertainty",
+    {
+      p_store_id: storeId,
+      p_payment_attempt_id: attempt.id,
+      p_reason: reason,
+      p_provider_reference: providerReference,
+    },
+  );
+  if (uncertaintyResult.error || !uncertaintyResult.data) {
+    return jsonResponse(
+      {
+        error:
+          "No se pudo registrar el resultado incierto. No repita el cargo.",
+        requires_reconciliation: true,
+      },
+      503,
+      corsHeaders,
+    );
+  }
+  const persisted = uncertaintyResult.data as PaymentAttemptResponse;
+  const terminal = persisted.status === "paid" || persisted.status === "failed";
+  return paymentAttemptJsonResponse(
+    persisted,
     {
       mode: "culqi_test_3ds",
       processed: true,
-      reason: culqiResponse.reason,
-      requires_reconciliation: true,
+      reason: terminal ? "already_finalized" : reason,
+      requires_reconciliation: persisted.reconciliation_required === true,
     },
-    202,
+    terminal ? 200 : 202,
     corsHeaders,
   );
 }
@@ -810,7 +864,6 @@ async function createCulqi3dsCharge({
           culqi_charge_id: chargeId,
           culqi_status: response.status,
           object: sanitizeCulqiString(body?.object),
-          three_ds_completed: true,
         },
       };
     }
@@ -837,7 +890,6 @@ async function createCulqi3dsCharge({
           culqi_status: response.status,
           code: failureCode,
           type: sanitizeCulqiString(body?.type),
-          three_ds_completed: true,
         },
       };
     }

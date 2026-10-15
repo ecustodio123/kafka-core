@@ -59,6 +59,7 @@ Deno.test("MOCK uncertain keeps processing and does not finalize", async () => {
   assertEquals(fake.calls.map((call) => call.name), [
     "reserve_kafka_payment_attempt",
     "claim_kafka_payment_attempt_processing",
+    "record_kafka_payment_attempt_uncertainty",
   ]);
 });
 
@@ -612,6 +613,71 @@ function createTestHandler(
   });
 }
 
+Deno.test("CULQI_TEST persists timeout and never repeats the charge on replay", async () => {
+  const fake = createFakeSupabase({ customer_email: "buyer@example.com" });
+  const fetch = createFakeFetch({ rejectsWithAbort: true });
+  const handler = createTestHandler(fake, {
+    CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+  }, fetch);
+  const response = await post(handler, {
+    payment_session_token: "payment-session-token",
+  });
+  const body = await response.json();
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  assertEquals(fake.calls.at(-1)?.args.p_reason, "culqi_timeout");
+  await post(handler, { payment_session_token: "payment-session-token" });
+  assertEquals(fetch.calls.length, 1);
+  assertEquals(
+    fake.calls.filter((c) =>
+      c.name === "record_kafka_payment_attempt_uncertainty"
+    ).length,
+    1,
+  );
+});
+
+Deno.test("CULQI_TEST reports persistence failure without retrying HTTP", async () => {
+  const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
+    uncertaintyError: true,
+  });
+  const fetch = createFakeFetch({ rejectsWithAbort: true });
+  const handler = createTestHandler(fake, {
+    CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+  }, fetch);
+  const response = await post(handler, {
+    payment_session_token: "payment-session-token",
+  });
+  assertEquals(response.status, 503);
+  assertNoSensitiveValues(await response.json());
+  await post(handler, { payment_session_token: "payment-session-token" });
+  assertEquals(fetch.calls.length, 1);
+});
+
+Deno.test("CULQI_TEST preserves a safe charge reference after failed finalization", async () => {
+  const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
+    finalizeError: true,
+  });
+  const fetch = createFakeFetch({
+    status: 200,
+    body: { id: "chr_test_savedreference", object: "charge" },
+  });
+  const handler = createTestHandler(fake, {
+    CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+  }, fetch);
+  const response = await post(handler, {
+    payment_session_token: "payment-session-token",
+  });
+  const body = await response.json();
+  assertEquals(response.status, 202);
+  assertEquals(body.payment_attempt.status, "processing");
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  assertEquals(
+    body.payment_attempt.provider_reference,
+    "chr_test_savedreference",
+  );
+  assertEquals(fake.calls.at(-1)?.args.p_reason, "culqi_finalize_failed");
+  assertEquals(fetch.calls.length, 1);
+});
+
 function createEnv(overrides: Record<string, string>) {
   return {
     CREATE_PAYMENT_ATTEMPT_ALLOWED_ORIGINS: ORIGIN,
@@ -622,6 +688,35 @@ function createEnv(overrides: Record<string, string>) {
     ...overrides,
   } as Record<string, string>;
 }
+
+Deno.test("CULQI_TEST late rejection reports the already-paid database result", async () => {
+  const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
+    finalizeReturnsPaid: true,
+  });
+  const fetch = createFakeFetch({
+    status: 402,
+    body: {
+      type: "card_error",
+      code: "card_declined",
+      decline_code: "insufficient_funds",
+    },
+  });
+  const response = await post(
+    createTestHandler(
+      fake,
+      { CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test" },
+      fetch,
+    ),
+    {
+      payment_session_token: "payment-session-token",
+    },
+  );
+  const body = await response.json();
+  assertEquals(response.status, 200);
+  assertEquals(body.payment_attempt.status, "paid");
+  assertEquals(body.payment_result.reason, "already_finalized");
+  assertEquals(fetch.calls.length, 1);
+});
 
 async function post(
   handler: (request: Request) => Promise<Response>,
@@ -652,6 +747,9 @@ async function post(
 function createFakeSupabase(
   orderOverrides: Record<string, unknown> = {},
   options: {
+    uncertaintyError?: boolean;
+    finalizeError?: boolean;
+    finalizeReturnsPaid?: boolean;
     claimAcquired?: boolean;
     privateKey?: string;
     sessionExpired?: boolean;
@@ -890,7 +988,34 @@ function createFakeSupabase(
         };
       }
 
+      if (name === "record_kafka_payment_attempt_uncertainty") {
+        if (options.uncertaintyError) {
+          return {
+            data: null,
+            error: { message: "TEST persistence unavailable" },
+          };
+        }
+        const attempt = Array.from(attempts.values()).find((item) =>
+          item.id === args.p_payment_attempt_id
+        );
+        if (!attempt) {
+          return { data: null, error: { message: "invalid uncertainty" } };
+        }
+        attempt.reconciliation_required = true;
+        attempt.reconciliation_reason = args.p_reason;
+        if (args.p_provider_reference) {
+          attempt.provider_reference = args.p_provider_reference;
+        }
+        return { data: attemptResponse(attempt), error: null };
+      }
+
       if (name === "finalize_kafka_payment_attempt") {
+        if (options.finalizeError) {
+          return {
+            data: null,
+            error: { message: "TEST finalization unavailable" },
+          };
+        }
         const attempt = Array.from(attempts.values()).find((item) =>
           item.id === args.p_payment_attempt_id
         );
@@ -901,14 +1026,15 @@ function createFakeSupabase(
           };
         }
 
-        attempt.status = args.p_final_status;
+        attempt.status = options.finalizeReturnsPaid
+          ? "paid"
+          : args.p_final_status;
         attempt.culqi_charge_id = args.p_culqi_charge_id;
         attempt.failure_code = args.p_failure_code;
         attempt.failure_message = args.p_failure_message;
         attempt.provider_reference = args.p_provider_reference;
-        order.status = args.p_final_status === "paid"
-          ? "paid"
-          : "payment_failed";
+        attempt.reconciliation_required = false;
+        order.status = attempt.status === "paid" ? "paid" : "payment_failed";
         return { data: attemptResponse(attempt), error: null };
       }
 
