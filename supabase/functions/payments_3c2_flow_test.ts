@@ -10,7 +10,7 @@ const STORE_ID = 1;
 const NOW = new Date("2026-10-13T12:00:00.000Z");
 const DEVICE_FINGER_PRINT_ID = "8019959c-fab1-49eb-bbbe-b846d308d8df";
 
-Deno.test("3C.2 integrated flow creates an online order, hashes session token and finalizes paid", async () => {
+Deno.test("integrated flow creates an order, hashes session token and blocks unverified paid finalization", async () => {
   const fake = createIntegratedSupabase();
   const fetch = createFakeFetch({
     status: 200,
@@ -32,9 +32,18 @@ Deno.test("3C.2 integrated flow creates an online order, hashes session token an
 
   assertEquals(orderResponse.status, 201);
   assertMatch(token, /^[A-Za-z0-9_-]{43}$/);
-  assertEquals(paymentResponse.status, 201);
-  assertEquals(paymentBody.payment_attempt.status, "paid");
-  assertEquals(paymentBody.payment_attempt.order_status, "paid");
+  assertEquals(paymentResponse.status, 202);
+  assertEquals(paymentBody.payment_attempt.status, "processing");
+  assertEquals(paymentBody.payment_attempt.order_status, "pending_payment");
+  assertEquals(paymentBody.payment_attempt.reconciliation_required, true);
+  assertEquals(
+    paymentBody.payment_attempt.provider_reference,
+    "chr_test_integratedpaid",
+  );
+  assertEquals(
+    fake.calls.some((call) => call.name === "finalize_kafka_payment_attempt"),
+    false,
+  );
   assertEquals(fetch.calls.length, 1);
   assertEquals(
     fake.calls.find((call) =>
@@ -156,9 +165,9 @@ Deno.test("3C.2 integrated flow keeps timeout and 3DS responses in processing", 
 
   assertEquals(threeDsResponse.status, 202);
   assertEquals(threeDsBody.payment_attempt.status, "processing");
-  assertEquals(threeDsBody.payment_attempt.requires_3ds, true);
-  assertEquals(threeDsBody.payment_attempt.three_ds_status, "required");
-  assertEquals(threeDsBody.payment_result.reason, "culqi_requires_3ds");
+  assertEquals(threeDsBody.payment_attempt.requires_3ds, false);
+  assertEquals(threeDsBody.payment_attempt.reconciliation_required, true);
+  assertEquals(threeDsBody.payment_result.reason, "culqi_ambiguous_201");
 });
 
 Deno.test("3C.2 integrated flow does not create a second charge for duplicate processing attempts", async () => {
@@ -584,6 +593,9 @@ function createIntegratedSupabase() {
         }
         attempt.reconciliation_required = true;
         attempt.reconciliation_reason = args.p_reason;
+        if (args.p_provider_reference) {
+          attempt.provider_reference = args.p_provider_reference;
+        }
         return { data: attemptResponse(order, attempt), error: null };
       }
 

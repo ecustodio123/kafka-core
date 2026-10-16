@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.117.3";
+import { validateCulqiTestEvidence } from "../_shared/culqi-test-evidence.ts";
 
 type CreatePaymentAttemptPayload = {
   store_id?: unknown;
@@ -588,56 +589,6 @@ async function processCulqiTestPaymentAttempt(
     deviceFingerPrintId: payload.deviceFingerPrintId,
   });
 
-  if (culqiResponse.kind === "success") {
-    const finalizeResult = await supabase.rpc(
-      "finalize_kafka_payment_attempt",
-      {
-        p_store_id: payload.storeId,
-        p_payment_attempt_id: processingAttempt.id,
-        p_final_status: "paid",
-        p_culqi_charge_id: culqiResponse.chargeId,
-        p_failure_code: null,
-        p_failure_message: null,
-        p_provider_event_id: `culqi-charge-${culqiResponse.chargeId}`,
-        p_provider_reference: culqiResponse.chargeId,
-        p_sanitized_payload: culqiResponse.sanitizedPayload,
-      },
-    );
-
-    if (finalizeResult.error) {
-      return await persistUncertaintyResponse(
-        supabase,
-        payload.storeId,
-        processingAttempt,
-        "culqi_finalize_failed",
-        {
-          mode: "culqi_test",
-          processed: true,
-          reason: "culqi_finalize_failed",
-          requires_reconciliation: true,
-        },
-        corsHeaders,
-        culqiResponse.chargeId,
-      );
-    }
-
-    return paymentAttemptJsonResponse(
-      finalizeResult.data as PaymentAttemptResponse,
-      {
-        mode: "culqi_test",
-        processed: true,
-        reason:
-          (finalizeResult.data as PaymentAttemptResponse).status !== "paid"
-            ? "already_finalized"
-            : "culqi_charge_paid",
-      },
-      (finalizeResult.data as PaymentAttemptResponse).status !== "paid"
-        ? 200
-        : 201,
-      corsHeaders,
-    );
-  }
-
   if (culqiResponse.kind === "definitive_failure") {
     const finalizeResult = await supabase.rpc(
       "finalize_kafka_payment_attempt",
@@ -743,6 +694,7 @@ async function processCulqiTestPaymentAttempt(
       requires_reconciliation: true,
     },
     corsHeaders,
+    culqiResponse.providerReference ?? null,
   );
 }
 
@@ -761,7 +713,11 @@ async function persistUncertaintyResponse(
       p_store_id: storeId,
       p_payment_attempt_id: attempt.id,
       p_reason: reason,
-      p_provider_reference: providerReference,
+      // Never overwrite an existing, different reference with an unverified candidate.
+      p_provider_reference: attempt.provider_reference &&
+          attempt.provider_reference !== providerReference
+        ? null
+        : providerReference,
     },
   );
   if (result.error || !result.data) {
@@ -959,11 +915,6 @@ function readCulqiChargesUrl(env: HandlerDependencies["env"]) {
 
 type CulqiChargeResult =
   | {
-    kind: "success";
-    chargeId: string;
-    sanitizedPayload: Record<string, unknown>;
-  }
-  | {
     kind: "definitive_failure";
     failureCode: string;
     failureMessage: string;
@@ -977,6 +928,7 @@ type CulqiChargeResult =
   | {
     kind: "uncertain";
     reason: string;
+    providerReference?: string | null;
   };
 
 async function createCulqiCharge({
@@ -1048,25 +1000,60 @@ async function createCulqiCharge({
     const body = await safeReadJson(response);
 
     if (response.status === 200) {
+      const evidence = validateCulqiTestEvidence({
+        operation: "create_charge",
+        httpStatus: response.status,
+        body,
+        expected: {
+          storeId,
+          orderId,
+          paymentAttemptId,
+          amountCents,
+          currency,
+          environment: "test",
+        },
+      });
       const chargeId = typeof body?.id === "string" ? body.id : "";
-
-      if (!/^chr_test_[A-Za-z0-9]+$/.test(chargeId)) {
+      if (
+        chargeId.trim() !== chargeId ||
+        !/^chr_test_[A-Za-z0-9]{1,151}$/.test(chargeId)
+      ) {
         return { kind: "uncertain", reason: "culqi_success_without_charge_id" };
       }
-
-      return {
-        kind: "success",
-        chargeId,
-        sanitizedPayload: {
-          culqi_charge_id: chargeId,
-          culqi_status: response.status,
-          object: sanitizeCulqiString(body?.object),
-        },
-      };
+      if (!evidence.canFinalizePaid) {
+        return {
+          kind: "uncertain",
+          reason: "culqi_ambiguous_200",
+          // Shape-valid ID is only a review candidate, never a confirmed charge.
+          providerReference: evidence.identity.status === "contradictory"
+            ? null
+            : chargeId,
+        };
+      }
+      // No financial-success branch exists until the provider contract is reviewed.
+      return { kind: "uncertain", reason: "culqi_ambiguous_200" };
     }
 
     if (response.status === 201) {
-      const providerReference = sanitizeCulqiString(body?.id) || null;
+      const evidence = validateCulqiTestEvidence({
+        operation: "create_charge",
+        httpStatus: response.status,
+        body,
+        expected: {
+          storeId,
+          orderId,
+          paymentAttemptId,
+          amountCents,
+          currency,
+          environment: "test",
+        },
+      });
+      // 201 signals 3DS, not a guaranteed charge-shaped identity response.
+      // Missing fields must not be filled from our request to manufacture evidence.
+      if (evidence.identity.status !== "compatible") {
+        return { kind: "uncertain", reason: "culqi_ambiguous_201" };
+      }
+      const providerReference = body!.id as string;
       return {
         kind: "requires_3ds",
         providerReference,

@@ -1,8 +1,9 @@
-# Culqi TEST financial evidence contract (not integrated)
+# Culqi TEST financial evidence contract (conservative caller integration)
 
 Reviewed 2026-10-15. Pure assessment only: no HTTP, database, Vault, environment,
-logging or state changes. No migration 014. Current callers and diagnostic output
-are unchanged. This module is NOT authorization to finalize a payment.
+logging or state changes. Phase 3D.3.3.3.5D.1 integrates it in both real POST HTTP 200
+paths as a blocking guard. No migration changes or diagnostic changes in that step.
+This module is NOT authorization to finalize a payment.
 
 ## Contract
 
@@ -75,37 +76,43 @@ Confirm these points with Culqi support and version-specific documentation plus
 sanitized TEST examples already available to the merchant; no new charge is needed
 for this subphase. Synthetic fixtures test conservatism, NOT actual provider behavior.
 
-## Current callers and exact future integration points
+## Current callers and remaining integration
 
-No handler imports this module yet. This is deliberate: changing the decisions now
-would alter the current charge flow, which is outside this subphase.
-
-1. `create-payment-attempt/index.ts`: `createCulqiCharge`, HTTP 200 branch
-   (currently line 1050), treats a TEST ID as success. Its caller invokes
-   `finalize_kafka_payment_attempt(... paid ...)` around line 593. Future integration
-   must assess the ORIGINAL response against the persisted order/attempt context
-   BEFORE producing `kind: success`; unverified results must persist uncertainty
-   without another POST. Existing sanitized payloads lack enough fields to assess.
-2. `complete-payment-3ds/index.ts`: `createCulqi3dsCharge`, HTTP 200 branch
-   (currently line 854), uses the same ID-only success rule, finalized around line 437.
-   Apply the same gate before emitting success, preserve the acquired claim on
-   uncertainty, never repeat the charge, and never turn 3DS data into verified proof.
+1. `create-payment-attempt/index.ts`: `createCulqiCharge`, HTTP 200 branch,
+   assesses the original parsed body against the persisted amount/order/attempt.
+   canFinalizePaid=false yields `culqi_ambiguous_200`, persisted with RPC 013.
+   There is no real `kind: success` result or real paid-finalization branch anymore.
+2. `complete-payment-3ds/index.ts`: `createCulqi3dsCharge`, HTTP 200 branch,
+   applies the same guard, yielding `culqi_3ds_ambiguous_200`. It preserves the claim,
+   processing state and reconciliation requirement without completing authentication.
+   Neither caller can activate paid finalization just by changing verifier policy;
+   a later reviewed implementation is required. Definitive card-decline handling
+   and initial 201 challenge handling remain unchanged by this focused correction.
 3. `reconcile-payment-attempt/index.ts`: after bounded GET parsing, the local
    identity checks begin around line 269 and `found_compatible` is returned around
    line 312. A future reviewed replacement may reuse identity results but must
    preserve the existing diagnostic-only response contract and read-only behavior.
    Do not pass that stripped public response to this validator as provider evidence.
 
-Future enablement must align BOTH paid callers with one reviewed verified-capture
-policy. Until then keep all payment/diagnostic flags disabled; an unused module
-does not repair their existing success criteria or protect direct service-role RPC use.
-Keep MOCK private and distinct from financial evidence; synthetic payment success is
-not provider evidence. No change to `finalize_kafka_payment_attempt` is made here.
+Shape-valid TEST charge IDs (160 total characters maximum) are only unverified
+review candidates; contradictory identity evidence is never attached to an attempt.
+Incomplete identity can retain a candidate for manual investigation, not financial
+application. An existing different reference is preserved, never overwritten; this
+schema cannot retain multiple competing references. RPC persistence failure returns
+503 and does not release claims or resend. No raw evidence is stored/logged here.
+
+Keep all payment/diagnostic flags disabled. MOCK remains private and separate and may
+still simulate paid with its existing protections; it cannot bypass the real path.
+Reporting an already-paid database state is not a new paid-finalization request.
+RPC 013 remains service-role-only and can still finalize when explicitly called by
+other privileged code: this integration is not a database-wide financial-write ban.
+No change to `finalize_kafka_payment_attempt` is made here.
 
 ## Next step toward 014
 
 First freeze a provider-confirmed evidence matrix and add the verified branch/tests.
-Then integrate both callers and persist uncertain outcomes safely. Only afterward
+The callers now fail closed; only after that contract confirmation should they gain
+a verified financial-success branch. Only afterward
 prepare the service-role-only apply RPC with orders -> attempts locks, snapshot
 revalidation, idempotent evidence/audit events and unchanged 3DS guarantees.
 The pure module cannot authenticate HTTP provenance, resolve rotated-account identity,

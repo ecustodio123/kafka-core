@@ -3,6 +3,7 @@ import {
   assertMatch,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createHandler } from "./index.ts";
+import { chargeFixture } from "../_shared/culqi-test-evidence.fixtures.ts";
 
 const STORE_ID = 1;
 const ORIGIN = "http://localhost:5173";
@@ -14,7 +15,7 @@ const SOURCE_ID = "tkn_test_sourcesafe";
 const CAVV = "CAVV_SAFE_TEST_VALUE";
 const XID = "XID_SAFE_TEST_VALUE";
 
-Deno.test("3DS success validates source, claims once and finalizes paid", async () => {
+Deno.test("3DS HTTP 200 validates source, claims once and stays uncertain without financial finalization", async () => {
   const fake = createFakeSupabase();
   const fetch = createFakeFetch({
     body: { id: "chr_test_3dspaid123", object: "charge" },
@@ -25,20 +26,14 @@ Deno.test("3DS success validates source, claims once and finalizes paid", async 
   const response = await post(handler);
   const body = await response.json();
 
-  assertEquals(response.status, 201);
-  assertEquals(body.payment_attempt.status, "paid");
-  assertEquals(body.payment_attempt.order_status, "paid");
-  assertEquals(body.payment_result.reason, "culqi_3ds_charge_paid");
+  assertEquals(response.status, 202);
+  assertEquals(body.payment_attempt.status, "processing");
+  assertEquals(body.payment_attempt.order_status, "pending_payment");
+  assertEquals(body.payment_result.reason, "culqi_3ds_ambiguous_200");
   assertEquals(body.payment_attempt.three_ds_status, "completion_processing");
   assertEquals(body.payment_attempt.reconciliation_required, true);
-  assertEquals(
-    (fake.calls[fake.calls.length - 1].args.p_sanitized_payload as Record<
-      string,
-      unknown
-    >)
-      .three_ds_authenticated,
-    undefined,
-  );
+  assertEquals(fake.calls.at(-1)?.args.p_sanitized_payload, undefined);
+  assertEquals(body.payment_attempt.provider_reference, "chr_test_requires3ds");
   assertEquals(fetch.calls.length, 1);
   assertEquals(fetch.calls[0].input, "https://api.culqi.com/v2/charges");
 
@@ -55,7 +50,7 @@ Deno.test("3DS success validates source, claims once and finalizes paid", async 
     "validate_payment_attempt_source",
     "get_culqi_test_private_key_for_payment",
     "claim_kafka_payment_attempt_3ds_completion",
-    "finalize_kafka_payment_attempt",
+    "record_kafka_payment_attempt_uncertainty",
   ]);
   assertNoSensitiveValues(body);
 });
@@ -109,14 +104,14 @@ Deno.test("HTTP 200 and browser 3DS data do not prove authentication", async () 
     authentication_3DS: { ...authentication3ds(), eci: "07" },
   });
   const body = await response.json();
-  assertEquals(body.payment_attempt.status, "paid");
+  assertEquals(body.payment_attempt.status, "processing");
   assertEquals(body.payment_attempt.three_ds_status, "completion_processing");
   assertEquals(body.payment_attempt.reconciliation_required, true);
-  const diagnostic = fake.calls[fake.calls.length - 1].args
-    .p_sanitized_payload as Record<string, unknown>;
-  assertEquals(diagnostic.culqi_status, 200);
-  assertEquals("three_ds_authenticated" in diagnostic, false);
-  assertEquals("authentication_3DS" in diagnostic, false);
+  assertEquals(fake.calls.at(-1)?.args.p_sanitized_payload, undefined);
+  assertEquals(
+    fake.calls.some((call) => call.name === "finalize_kafka_payment_attempt"),
+    false,
+  );
   assertNoSensitiveValues(body);
 });
 
@@ -464,8 +459,8 @@ Deno.test("3DS timeout persistence survives replay without another charge", asyn
   );
 });
 
-Deno.test("3DS failed finalization persists the confirmed charge reference", async () => {
-  const fake = createFakeSupabase({ finalizeError: true });
+Deno.test("3DS persists a candidate reference when no earlier reference exists, without finalizing", async () => {
+  const fake = createFakeSupabase({ providerReference: null });
   const fetch = createFakeFetch({
     status: 200,
     body: { id: "chr_test_3dsreference", object: "charge" },
@@ -479,7 +474,11 @@ Deno.test("3DS failed finalization persists the confirmed charge reference", asy
     "chr_test_3dsreference",
   );
   assertEquals(body.payment_attempt.status, "processing");
-  assertEquals(fake.calls.at(-1)?.args.p_reason, "culqi_3ds_finalize_failed");
+  assertEquals(fake.calls.at(-1)?.args.p_reason, "culqi_3ds_ambiguous_200");
+  assertEquals(
+    fake.calls.some((call) => call.name === "finalize_kafka_payment_attempt"),
+    false,
+  );
   await post(handler);
   assertEquals(fetch.calls.length, 1);
 });
@@ -495,7 +494,84 @@ Deno.test("3DS persistence failure returns a safe error and does not release the
   assertEquals(fetch.calls.length, 1);
 });
 
+Deno.test("3DS complete, conflicting, incomplete and challenge evidence cannot finalize paid or failed", async () => {
+  const complete = chargeFixture({
+    id: "chr_test_requires3ds",
+    amount: 1299,
+    current_amount: 1299,
+    paid: true,
+    metadata: {
+      kafka_store_id: String(STORE_ID),
+      kafka_order_id: ORDER_ID,
+      kafka_payment_attempt_id: ATTEMPT_ID,
+    },
+  });
+  for (
+    const providerBody of [
+      complete,
+      { ...complete, amount: 1 },
+      { ...complete, currency_code: "USD" },
+      { ...complete, metadata: { ...complete.metadata, kafka_store_id: "2" } },
+      {
+        ...complete,
+        metadata: { ...complete.metadata, kafka_order_id: "other" },
+      },
+      {
+        ...complete,
+        metadata: { ...complete.metadata, kafka_payment_attempt_id: "other" },
+      },
+      { ...complete, object: "token" },
+      { ...complete, id: "chr_live_invalid" },
+      { id: complete.id },
+      {},
+      { action_code: "REVIEW", requires_3ds: true },
+    ]
+  ) {
+    const fake = createFakeSupabase();
+    const fetch = createFakeFetch({ status: 200, body: providerBody });
+    const handler = createTestHandler(fake, fetch);
+    const response = await post(handler);
+    const body = await response.json();
+    assertEquals(response.status, 202);
+    assertEquals(body.payment_attempt.status, "processing");
+    assertEquals(body.payment_attempt.order_status, "pending_payment");
+    assertEquals(body.payment_attempt.three_ds_status, "completion_processing");
+    assertEquals(body.payment_attempt.reconciliation_required, true);
+    assertEquals(
+      body.payment_attempt.provider_reference,
+      "chr_test_requires3ds",
+    );
+    assertEquals(
+      fake.calls.some((call) => call.name === "finalize_kafka_payment_attempt"),
+      false,
+    );
+    assertNoSensitiveValues(body);
+    await post(handler);
+    assertEquals(fetch.calls.length, 1);
+  }
+});
+
+Deno.test("3DS ambiguous 201 preserves the claim without finalization or a new POST", async () => {
+  const fake = createFakeSupabase();
+  const fetch = createFakeFetch({
+    status: 201,
+    body: { action_code: "REVIEW" },
+  });
+  const handler = createTestHandler(fake, fetch);
+  const body = await (await post(handler)).json();
+  assertEquals(body.payment_attempt.status, "processing");
+  assertEquals(body.payment_attempt.three_ds_status, "completion_processing");
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  assertEquals(
+    fake.calls.some((call) => call.name === "finalize_kafka_payment_attempt"),
+    false,
+  );
+  await post(handler);
+  assertEquals(fetch.calls.length, 1);
+});
+
 function createFakeSupabase(options: {
+  providerReference?: string | null;
   uncertaintyError?: boolean;
   finalizeError?: boolean;
   finalizeReturnsPaid?: boolean;
@@ -533,7 +609,9 @@ function createFakeSupabase(options: {
     culqi_charge_id: null,
     failure_code: null,
     failure_message: null,
-    provider_reference: "chr_test_requires3ds",
+    provider_reference: options.providerReference === undefined
+      ? "chr_test_requires3ds"
+      : options.providerReference,
     requires_3ds: true,
     three_ds_status: "required",
     reconciliation_required: false,
@@ -660,6 +738,15 @@ function createFakeSupabase(options: {
           return {
             data: null,
             error: { message: "TEST persistence unavailable" },
+          };
+        }
+        if (
+          args.p_provider_reference && attempt.provider_reference &&
+          args.p_provider_reference !== attempt.provider_reference
+        ) {
+          return {
+            data: null,
+            error: { message: "registro de incertidumbre invalido" },
           };
         }
         attempt.reconciliation_required = true;

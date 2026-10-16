@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.117.3";
+import { validateCulqiTestEvidence } from "../_shared/culqi-test-evidence.ts";
 
 type CompletePayment3dsPayload = {
   store_id?: unknown;
@@ -432,50 +433,6 @@ async function processCompletePayment3ds(
     timeoutMs: readTimeoutMs(dependencies.env),
   });
 
-  if (culqiResponse.kind === "success") {
-    const finalizeResult = await supabase.rpc(
-      "finalize_kafka_payment_attempt",
-      {
-        p_store_id: payload.storeId,
-        p_payment_attempt_id: claimedAttempt.id,
-        p_final_status: "paid",
-        p_culqi_charge_id: culqiResponse.chargeId,
-        p_failure_code: null,
-        p_failure_message: null,
-        p_provider_event_id: `culqi-3ds-charge-${culqiResponse.chargeId}`,
-        p_provider_reference: culqiResponse.chargeId,
-        p_sanitized_payload: culqiResponse.sanitizedPayload,
-      },
-    );
-
-    if (finalizeResult.error) {
-      return await persistUncertaintyResponse(
-        supabase,
-        payload.storeId,
-        claimedAttempt,
-        "culqi_3ds_finalize_failed",
-        corsHeaders,
-        culqiResponse.chargeId,
-      );
-    }
-
-    return paymentAttemptJsonResponse(
-      finalizeResult.data as PaymentAttemptResponse,
-      {
-        mode: "culqi_test_3ds",
-        processed: true,
-        reason:
-          (finalizeResult.data as PaymentAttemptResponse).status !== "paid"
-            ? "already_finalized"
-            : "culqi_3ds_charge_paid",
-      },
-      (finalizeResult.data as PaymentAttemptResponse).status !== "paid"
-        ? 200
-        : 201,
-      corsHeaders,
-    );
-  }
-
   if (culqiResponse.kind === "definitive_failure") {
     const finalizeResult = await supabase.rpc(
       "finalize_kafka_payment_attempt",
@@ -525,6 +482,7 @@ async function processCompletePayment3ds(
     claimedAttempt,
     culqiResponse.reason,
     corsHeaders,
+    culqiResponse.providerReference ?? null,
   );
 }
 
@@ -542,7 +500,10 @@ async function persistUncertaintyResponse(
       p_store_id: storeId,
       p_payment_attempt_id: attempt.id,
       p_reason: reason,
-      p_provider_reference: providerReference,
+      p_provider_reference: attempt.provider_reference &&
+          attempt.provider_reference !== providerReference
+        ? null
+        : providerReference,
     },
   );
   if (uncertaintyResult.error || !uncertaintyResult.data) {
@@ -765,11 +726,6 @@ function readCulqiChargesUrl(env: HandlerDependencies["env"]) {
 
 type CulqiChargeResult =
   | {
-    kind: "success";
-    chargeId: string;
-    sanitizedPayload: Record<string, unknown>;
-  }
-  | {
     kind: "definitive_failure";
     failureCode: string;
     failureMessage: string;
@@ -778,6 +734,7 @@ type CulqiChargeResult =
   | {
     kind: "uncertain";
     reason: string;
+    providerReference?: string | null;
   };
 
 async function createCulqi3dsCharge({
@@ -852,20 +809,36 @@ async function createCulqi3dsCharge({
     const body = await safeReadJson(response);
 
     if (response.status === 200) {
+      const evidence = validateCulqiTestEvidence({
+        operation: "complete_3ds",
+        httpStatus: response.status,
+        body,
+        expected: {
+          storeId,
+          orderId,
+          paymentAttemptId,
+          amountCents,
+          currency,
+          environment: "test",
+        },
+      });
       const chargeId = typeof body?.id === "string" ? body.id : "";
-      if (!/^chr_test_[A-Za-z0-9]+$/.test(chargeId)) {
+      if (
+        chargeId.trim() !== chargeId ||
+        !/^chr_test_[A-Za-z0-9]{1,151}$/.test(chargeId)
+      ) {
         return { kind: "uncertain", reason: "culqi_success_without_charge_id" };
       }
-
-      return {
-        kind: "success",
-        chargeId,
-        sanitizedPayload: {
-          culqi_charge_id: chargeId,
-          culqi_status: response.status,
-          object: sanitizeCulqiString(body?.object),
-        },
-      };
+      if (!evidence.canFinalizePaid) {
+        return {
+          kind: "uncertain",
+          reason: "culqi_3ds_ambiguous_200",
+          providerReference: evidence.identity.status === "contradictory"
+            ? null
+            : chargeId,
+        };
+      }
+      return { kind: "uncertain", reason: "culqi_3ds_ambiguous_200" };
     }
 
     if (response.status === 400 || response.status === 402) {

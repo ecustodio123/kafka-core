@@ -3,6 +3,7 @@ import {
   assertMatch,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createHandler } from "./index.ts";
+import { chargeFixture } from "../_shared/culqi-test-evidence.fixtures.ts";
 
 const STORE_ID = 1;
 const ORIGIN = "http://localhost:5173";
@@ -170,7 +171,7 @@ Deno.test("MOCK requires private test runner secret", async () => {
   assertEquals(fake.calls.length, 0);
 });
 
-Deno.test("CULQI_TEST success validates session, charges once and finalizes paid", async () => {
+Deno.test("CULQI_TEST HTTP 200 validates session, charges once and persists uncertainty instead of paid", async () => {
   const fake = createFakeSupabase({
     customer_email: "buyer@example.com",
     whatsapp_message: "normal commerce order",
@@ -188,10 +189,13 @@ Deno.test("CULQI_TEST success validates session, charges once and finalizes paid
   });
   const body = await response.json();
 
-  assertEquals(response.status, 201);
-  assertEquals(body.payment_attempt.status, "paid");
+  assertEquals(response.status, 202);
+  assertEquals(body.payment_attempt.status, "processing");
+  assertEquals(body.payment_attempt.order_status, "pending_payment");
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  assertEquals(body.payment_attempt.provider_reference, "chr_test_paid123");
   assertEquals(body.payment_result.mode, "culqi_test");
-  assertEquals(body.payment_result.reason, "culqi_charge_paid");
+  assertEquals(body.payment_result.reason, "culqi_ambiguous_200");
   assertEquals(fetch.calls.length, 1);
   assertEquals(fetch.calls[0].input, "https://api.culqi.com/v2/charges");
   const requestBody = JSON.parse(String(fetch.calls[0].init?.body));
@@ -208,7 +212,7 @@ Deno.test("CULQI_TEST success validates session, charges once and finalizes paid
     "validate_order_payment_session_and_reserve_attempt",
     "get_culqi_test_private_key_for_payment",
     "claim_kafka_payment_attempt_processing",
-    "finalize_kafka_payment_attempt",
+    "record_kafka_payment_attempt_uncertainty",
   ]);
   assertNoSensitiveValues(body);
 });
@@ -382,7 +386,17 @@ Deno.test("CULQI_TEST 201 3DS response persists 3DS metadata without finalizing 
   });
   const fetch = createFakeFetch({
     status: 201,
-    body: { id: "chr_test_requires3ds", object: "charge" },
+    body: {
+      id: "chr_test_requires3ds",
+      object: "charge",
+      amount: 1299,
+      currency_code: "PEN",
+      metadata: {
+        kafka_store_id: String(STORE_ID),
+        kafka_order_id: ORDER_ID,
+        kafka_payment_attempt_id: "22222222-2222-4222-8222-000000000001",
+      },
+    },
   });
   const handler = createTestHandler(fake, {
     CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
@@ -416,6 +430,111 @@ Deno.test("CULQI_TEST 201 3DS response persists 3DS metadata without finalizing 
     DEVICE_FINGER_PRINT_ID,
   );
   assertNoSensitiveValues(body);
+  await Promise.all([
+    post(handler, { payment_session_token: "payment-session-token" }),
+    post(handler, { payment_session_token: "payment-session-token" }),
+  ]);
+  assertEquals(fetch.calls.length, 1);
+  assertEquals(
+    fake.calls.filter((call) =>
+      call.name === "mark_kafka_payment_attempt_requires_3ds"
+    ).length,
+    1,
+  );
+});
+
+Deno.test("CULQI_TEST unsafe or incomplete 201 identity cannot enable 3DS or bind a reference", async () => {
+  const compatible = {
+    id: "chr_test_requires3ds",
+    object: "charge",
+    amount: 1299,
+    currency_code: "PEN",
+    metadata: {
+      kafka_store_id: String(STORE_ID),
+      kafka_order_id: ORDER_ID,
+      kafka_payment_attempt_id: "22222222-2222-4222-8222-000000000001",
+    },
+  };
+  for (
+    const providerBody of [
+      ...[
+        "chr_live_wrong",
+        "chr_test_../wrong",
+        " chr_test_wrong",
+        "chr_test_",
+        "chr_test_" + "a".repeat(152),
+      ]
+        .map((id) => ({ ...compatible, id })),
+      { ...compatible, amount: 1 },
+      { ...compatible, currency_code: "USD" },
+      { ...compatible, object: "token" },
+      ...["kafka_store_id", "kafka_order_id", "kafka_payment_attempt_id"]
+        .map((field) => ({
+          ...compatible,
+          metadata: { ...compatible.metadata, [field]: "other" },
+        })),
+      { id: compatible.id, object: "charge" },
+      { ...compatible, metadata: undefined },
+      { requires_3ds: true, action_code: "REVIEW" },
+      {},
+    ]
+  ) {
+    const fake = createFakeSupabase({ customer_email: "buyer@example.com" });
+    const fetch = createFakeFetch({ status: 201, body: providerBody });
+    const handler = createTestHandler(fake, {
+      CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+    }, fetch);
+    const response = await post(handler, {
+      payment_session_token: "payment-session-token",
+    });
+    const body = await response.json();
+    assertEquals(response.status, 202);
+    assertEquals(body.payment_attempt.status, "processing");
+    assertEquals(body.payment_attempt.requires_3ds, false);
+    assertEquals(body.payment_attempt.provider_reference, null);
+    assertEquals(body.payment_attempt.reconciliation_required, true);
+    assertEquals(body.payment_result.reason, "culqi_ambiguous_201");
+    assertEquals(
+      fake.calls.some((call) =>
+        call.name === "mark_kafka_payment_attempt_requires_3ds" ||
+        call.name === "finalize_kafka_payment_attempt"
+      ),
+      false,
+    );
+    assertNoSensitiveValues(body);
+    await post(handler, { payment_session_token: "payment-session-token" });
+    assertEquals(fetch.calls.length, 1);
+  }
+});
+
+Deno.test("CULQI_TEST incomplete 201 with uncertainty persistence failure keeps claim and never resends", async () => {
+  const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
+    uncertaintyError: true,
+  });
+  const fetch = createFakeFetch({
+    status: 201,
+    body: { id: "chr_test_requires3ds" },
+  });
+  const handler = createTestHandler(fake, {
+    CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+  }, fetch);
+  const response = await post(handler, {
+    payment_session_token: "payment-session-token",
+  });
+  assertEquals(response.status, 503);
+  assertNoSensitiveValues(await response.json());
+  const replay = await post(handler, {
+    payment_session_token: "payment-session-token",
+  });
+  assertEquals((await replay.json()).payment_attempt.status, "processing");
+  assertEquals(fetch.calls.length, 1);
+  assertEquals(
+    fake.calls.some((call) =>
+      call.name === "mark_kafka_payment_attempt_requires_3ds" ||
+      call.name === "finalize_kafka_payment_attempt"
+    ),
+    false,
+  );
 });
 
 Deno.test("CULQI_TEST requires device fingerprint before reserve and HTTP call", async () => {
@@ -652,7 +771,7 @@ Deno.test("CULQI_TEST reports persistence failure without retrying HTTP", async 
   assertEquals(fetch.calls.length, 1);
 });
 
-Deno.test("CULQI_TEST preserves a safe charge reference after failed finalization", async () => {
+Deno.test("CULQI_TEST preserves a candidate reference without attempting financial finalization", async () => {
   const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
     finalizeError: true,
   });
@@ -674,8 +793,97 @@ Deno.test("CULQI_TEST preserves a safe charge reference after failed finalizatio
     body.payment_attempt.provider_reference,
     "chr_test_savedreference",
   );
-  assertEquals(fake.calls.at(-1)?.args.p_reason, "culqi_finalize_failed");
+  assertEquals(fake.calls.at(-1)?.args.p_reason, "culqi_ambiguous_200");
+  assertEquals(
+    fake.calls.some((call) => call.name === "finalize_kafka_payment_attempt"),
+    false,
+  );
   assertEquals(fetch.calls.length, 1);
+});
+
+Deno.test("CULQI_TEST complete, contradictory, incomplete and 3DS-shaped 200 evidence never finalizes", async () => {
+  const complete = chargeFixture({
+    amount: 1299,
+    current_amount: 1299,
+    paid: true,
+    metadata: {
+      kafka_store_id: String(STORE_ID),
+      kafka_order_id: ORDER_ID,
+      kafka_payment_attempt_id: "22222222-2222-4222-8222-000000000001",
+    },
+  });
+  for (
+    const providerBody of [
+      complete,
+      { ...complete, amount: 1 },
+      { ...complete, currency_code: "USD" },
+      { ...complete, metadata: { ...complete.metadata, kafka_store_id: "2" } },
+      {
+        ...complete,
+        metadata: { ...complete.metadata, kafka_order_id: "other" },
+      },
+      {
+        ...complete,
+        metadata: { ...complete.metadata, kafka_payment_attempt_id: "other" },
+      },
+      { ...complete, object: "token" },
+      { ...complete, id: "chr_live_invalid" },
+      { id: complete.id },
+      {},
+      { action_code: "REVIEW", requires_3ds: true },
+    ]
+  ) {
+    const fake = createFakeSupabase({ customer_email: "buyer@example.com" });
+    const fetch = createFakeFetch({ status: 200, body: providerBody });
+    const handler = createTestHandler(fake, {
+      CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+    }, fetch);
+    const response = await post(handler, {
+      payment_session_token: "payment-session-token",
+    });
+    const body = await response.json();
+    assertEquals(response.status, 202);
+    assertEquals(body.payment_attempt.status, "processing");
+    assertEquals(body.payment_attempt.order_status, "pending_payment");
+    assertEquals(body.payment_attempt.reconciliation_required, true);
+    assertEquals(
+      fake.calls.some((call) => call.name === "finalize_kafka_payment_attempt"),
+      false,
+    );
+    const contradictory = "amount" in providerBody &&
+      (providerBody.amount !== 1299 || providerBody.currency_code !== "PEN");
+    // A mismatched amount must never bind a provider reference to this attempt.
+    if (contradictory) {
+      assertEquals(body.payment_attempt.provider_reference, null);
+    }
+    if (providerBody === complete) {
+      assertEquals(body.payment_attempt.provider_reference, complete.id);
+    }
+    assertNoSensitiveValues(body);
+    await post(handler, { payment_session_token: "payment-session-token" });
+    assertEquals(fetch.calls.length, 1);
+  }
+});
+
+Deno.test("CULQI_TEST unverified 200 persistence failure never finalizes or resends", async () => {
+  const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
+    uncertaintyError: true,
+  });
+  const fetch = createFakeFetch({ status: 200 });
+  const handler = createTestHandler(fake, {
+    CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+  }, fetch);
+  const response = await post(handler, {
+    payment_session_token: "payment-session-token",
+  });
+  assertEquals(response.status, 503);
+  assertNoSensitiveValues(await response.json());
+  await post(handler, { payment_session_token: "payment-session-token" });
+  assertEquals(fetch.calls.length, 1);
+  assertEquals(
+    fake.calls.some((call) => call.name === "finalize_kafka_payment_attempt"),
+    false,
+  );
 });
 
 function createEnv(overrides: Record<string, string>) {
