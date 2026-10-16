@@ -344,11 +344,30 @@ function createIntegratedSupabase() {
       failure_code: attempt.failure_code ?? null,
       failure_message: attempt.failure_message ?? null,
       provider_reference: attempt.provider_reference ?? null,
+      created_at: "2026-10-13T12:00:00.000Z",
+      updated_at: "2026-10-13T12:00:00.000Z",
+    };
+  }
+
+  function threeDsResponse(
+    order: Record<string, unknown>,
+    attempt: Record<string, unknown>,
+  ) {
+    return {
+      ...attemptResponse(order, attempt),
       requires_3ds: attempt.requires_3ds ?? false,
       three_ds_status: attempt.three_ds_status ?? null,
       reconciliation_required: attempt.reconciliation_required ?? false,
-      created_at: "2026-10-13T12:00:00.000Z",
-      updated_at: "2026-10-13T12:00:00.000Z",
+    };
+  }
+
+  function reconciliationResponse(
+    order: Record<string, unknown>,
+    attempt: Record<string, unknown>,
+  ) {
+    return {
+      ...threeDsResponse(order, attempt),
+      three_ds_completed_at: attempt.three_ds_completed_at ?? null,
     };
   }
 
@@ -572,6 +591,17 @@ function createIntegratedSupabase() {
           };
         }
 
+        if (attempt.reconciliation_required === true) {
+          return {
+            data: {
+              acquired: false,
+              reason: "reconciliation_required",
+              payment_attempt: attemptResponse(order, attempt),
+            },
+            error: null,
+          };
+        }
+
         attempt.status = "processing";
         return {
           data: {
@@ -596,7 +626,7 @@ function createIntegratedSupabase() {
         if (args.p_provider_reference) {
           attempt.provider_reference = args.p_provider_reference;
         }
-        return { data: attemptResponse(order, attempt), error: null };
+        return { data: reconciliationResponse(order, attempt), error: null };
       }
 
       if (name === "finalize_kafka_payment_attempt") {
@@ -621,7 +651,7 @@ function createIntegratedSupabase() {
           ? "paid"
           : "payment_failed";
 
-        return { data: attemptResponse(order, attempt), error: null };
+        return { data: reconciliationResponse(order, attempt), error: null };
       }
 
       if (name === "mark_kafka_payment_attempt_requires_3ds") {
@@ -642,7 +672,7 @@ function createIntegratedSupabase() {
         attempt.provider_reference = args.p_provider_reference;
         attempt.reconciliation_required = false;
 
-        return { data: attemptResponse(order, attempt), error: null };
+        return { data: threeDsResponse(order, attempt), error: null };
       }
 
       return { data: null, error: { message: `RPC inesperado: ${name}` } };

@@ -354,6 +354,252 @@ Deno.test("CULQI_TEST rejects non official Culqi endpoint before reserve", async
   assertEquals(fake.calls.length, 0);
 });
 
+Deno.test("CULQI_TEST recovers the same created reservation after Vault failure", async () => {
+  const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
+    vaultFailuresRemaining: 1,
+  });
+  const fetch = createFakeFetch({
+    status: 200,
+    body: { id: "chr_test_recovered" },
+  });
+  const handler = createTestHandler(fake, {
+    CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+  }, fetch);
+  const payload = { payment_session_token: "payment-session-token" };
+  assertEquals((await post(handler, payload)).status, 500);
+  const reserved = fake.attempts.get("attempt-key")!;
+  assertEquals(reserved.status, "created");
+  assertEquals(fetch.calls.length, 0);
+  assertEquals(
+    fake.calls.some((call) =>
+      call.name === "claim_kafka_payment_attempt_processing"
+    ),
+    false,
+  );
+
+  const response = await post(handler, payload);
+  const body = await response.json();
+  assertEquals(response.status, 202);
+  assertEquals(body.payment_attempt.id, reserved.id);
+  assertEquals(body.payment_attempt.status, "processing");
+  assertEquals(body.payment_attempt.reconciliation_required, true);
+  assertEquals(fake.attempts.size, 1);
+  assertEquals(fetch.calls.length, 1);
+  assertNoSensitiveValues(body);
+});
+
+Deno.test("CULQI_TEST concurrent created replays reach claim but only one sends a charge", async () => {
+  let arrivals = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
+    vaultFailuresRemaining: 1,
+    beforePrivateKey: async () => {
+      arrivals += 1;
+      if (arrivals === 2) release();
+      await gate;
+    },
+  });
+  const fetch = createFakeFetch({ status: 200 });
+  const handler = createTestHandler(fake, {
+    CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+  }, fetch);
+  const payload = { payment_session_token: "payment-session-token" };
+  assertEquals((await post(handler, payload)).status, 500);
+  const responses = await Promise.all([
+    post(handler, payload),
+    post(handler, payload),
+  ]);
+  const bodies = await Promise.all(
+    responses.map((response) => response.json()),
+  );
+  assertEquals(arrivals, 2);
+  assertEquals(
+    fake.calls.filter((call) =>
+      call.name === "claim_kafka_payment_attempt_processing"
+    ).length,
+    2,
+  );
+  assertEquals(bodies[0].payment_attempt.id, bodies[1].payment_attempt.id);
+  assertEquals(
+    bodies.every((body) => body.payment_attempt.status === "processing"),
+    true,
+  );
+  assertEquals(
+    bodies.some((body) => body.payment_result.reason === "already_processing"),
+    true,
+  );
+  assertEquals(fetch.calls.length, 1);
+  assertEquals(fake.attempts.size, 1);
+});
+
+Deno.test("CULQI_TEST created recovery preserves source, order, tenant and pricing conflicts", async () => {
+  for (const mismatch of ["source", "order", "tenant", "amount", "currency"]) {
+    const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
+      vaultFailuresRemaining: 1,
+    });
+    const fetch = createFakeFetch({ status: 200 });
+    const handler = createTestHandler(fake, {
+      CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+    }, fetch);
+    const payload = { payment_session_token: "payment-session-token" };
+    assertEquals((await post(handler, payload)).status, 500);
+    const attempt = fake.attempts.get("attempt-key")!;
+    const overrides: Record<string, unknown> = {};
+    if (mismatch === "source") overrides.source_id = "tkn_test_different";
+    if (mismatch === "order") {
+      overrides.order_id = "33333333-3333-4333-8333-333333333333";
+    }
+    if (mismatch === "tenant") overrides.store_id = 2;
+    if (mismatch === "amount") attempt.amount_cents = 1300;
+    if (mismatch === "currency") attempt.currency = "USD";
+    const response = await post(handler, { ...payload, ...overrides });
+    assertEquals(
+      response.status,
+      mismatch === "order" || mismatch === "tenant" ? 401 : 409,
+    );
+    assertEquals(attempt.status, "created");
+    assertEquals(fetch.calls.length, 0);
+    assertEquals(
+      fake.calls.filter((call) =>
+        call.name === "get_culqi_test_private_key_for_payment"
+      ).length,
+      1,
+    );
+    assertEquals(
+      fake.calls.some((call) =>
+        call.name === "claim_kafka_payment_attempt_processing"
+      ),
+      false,
+    );
+    assertNoSensitiveValues(await response.json());
+  }
+});
+
+Deno.test("CULQI_TEST created recovery revalidates session and never bypasses expiry or revocation", async () => {
+  for (
+    const failure of [
+      "sessionExpired",
+      "sessionRevoked",
+      "sessionValid",
+    ] as const
+  ) {
+    const options = {
+      vaultFailuresRemaining: 1,
+      sessionExpired: false,
+      sessionRevoked: false,
+      sessionValid: true,
+    };
+    const fake = createFakeSupabase(
+      { customer_email: "buyer@example.com" },
+      options,
+    );
+    const fetch = createFakeFetch({ status: 200 });
+    const handler = createTestHandler(fake, {
+      CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+    }, fetch);
+    const payload = { payment_session_token: "payment-session-token" };
+    assertEquals((await post(handler, payload)).status, 500);
+    options[failure] = failure !== "sessionValid";
+    assertEquals((await post(handler, payload)).status, 401);
+    assertEquals(fake.attempts.get("attempt-key")!.status, "created");
+    assertEquals(fetch.calls.length, 0);
+    assertEquals(
+      fake.calls.some((call) =>
+        call.name === "claim_kafka_payment_attempt_processing"
+      ),
+      false,
+    );
+  }
+});
+
+Deno.test("CULQI_TEST replay never recovers non-created or uncertain reservations", async () => {
+  for (
+    const status of [
+      "processing",
+      "paid",
+      "failed",
+      "expired",
+      "cancelled",
+      "created",
+    ]
+  ) {
+    const fake = createFakeSupabase({ customer_email: "buyer@example.com" }, {
+      vaultFailuresRemaining: 1,
+    });
+    const fetch = createFakeFetch({ status: 200 });
+    const handler = createTestHandler(fake, {
+      CREATE_PAYMENT_ATTEMPT_MODE: "culqi_test",
+    }, fetch);
+    const payload = { payment_session_token: "payment-session-token" };
+    assertEquals((await post(handler, payload)).status, 500);
+    const attempt = fake.attempts.get("attempt-key")!;
+    attempt.status = status;
+    attempt.reconciliation_required = true;
+    const response = await post(handler, payload);
+    const body = await response.json();
+    assertEquals(body.payment_attempt.status, status);
+    assertEquals(body.payment_result.processed, false);
+    assertEquals(fetch.calls.length, 0);
+    assertEquals(
+      fake.calls.filter((call) =>
+        call.name === "get_culqi_test_private_key_for_payment"
+      ).length,
+      status === "created" ? 2 : 1,
+    );
+    assertEquals(
+      fake.calls.filter((call) =>
+        call.name === "claim_kafka_payment_attempt_processing"
+      ).length,
+      status === "created" ? 1 : 0,
+    );
+    if (status === "created") {
+      assertEquals(body.payment_result.reason, "reconciliation_required");
+      assertEquals("reconciliation_required" in body.payment_attempt, false);
+    }
+  }
+});
+
+Deno.test("CULQI_TEST reservation and claim doubles expose only the base SQL contract", async () => {
+  const fake = createFakeSupabase();
+  const reserved = await fake.rpc(
+    "validate_order_payment_session_and_reserve_attempt",
+    {
+      p_store_id: STORE_ID,
+      p_order_id: ORDER_ID,
+      p_idempotency_key: "contract",
+      p_culqi_source_id: "tkn_test_contract",
+    },
+  );
+  assertEquals(reserved.error, null);
+  const attempt =
+    (reserved.data as { payment_attempt: Record<string, unknown> })
+      .payment_attempt;
+  const claim = await fake.rpc("claim_kafka_payment_attempt_processing", {
+    p_store_id: STORE_ID,
+    p_payment_attempt_id: attempt.id,
+  });
+  const claimed = claim.data as {
+    acquired: boolean;
+    payment_attempt: Record<string, unknown>;
+  };
+  assertEquals(claimed.acquired, true);
+  for (const body of [attempt, claimed.payment_attempt]) {
+    for (
+      const field of [
+        "reconciliation_required",
+        "requires_3ds",
+        "three_ds_status",
+        "three_ds_completed_at",
+      ]
+    ) {
+      assertEquals(field in body, false);
+    }
+  }
+});
+
 Deno.test("CULQI_TEST timeout keeps processing for reconciliation", async () => {
   const fake = createFakeSupabase({
     customer_email: "buyer@example.com",
@@ -960,6 +1206,8 @@ function createFakeSupabase(
     finalizeReturnsPaid?: boolean;
     claimAcquired?: boolean;
     privateKey?: string;
+    vaultFailuresRemaining?: number;
+    beforePrivateKey?: () => Promise<void>;
     sessionExpired?: boolean;
     sessionValid?: boolean;
     sessionRevoked?: boolean;
@@ -994,18 +1242,35 @@ function createFakeSupabase(
       failure_code: attempt.failure_code ?? null,
       failure_message: attempt.failure_message ?? null,
       provider_reference: attempt.provider_reference ?? null,
+      created_at: "2026-10-13T00:00:00.000Z",
+      updated_at: "2026-10-13T00:00:00.000Z",
+    };
+  }
+
+  function threeDsResponse(attempt: Record<string, unknown>) {
+    return {
+      ...attemptResponse(attempt),
       requires_3ds: attempt.requires_3ds ?? false,
       three_ds_status: attempt.three_ds_status ?? null,
       reconciliation_required: attempt.reconciliation_required ?? false,
-      created_at: "2026-10-13T00:00:00.000Z",
-      updated_at: "2026-10-13T00:00:00.000Z",
+    };
+  }
+
+  function reconciliationResponse(attempt: Record<string, unknown>) {
+    return {
+      ...threeDsResponse(attempt),
+      three_ds_completed_at: attempt.three_ds_completed_at ?? null,
     };
   }
 
   function reserveAttempt(args: Record<string, unknown>) {
     const existing = attempts.get(String(args.p_idempotency_key));
     if (existing) {
-      if (existing.source_id !== args.p_culqi_source_id) {
+      if (
+        existing.source_id !== args.p_culqi_source_id ||
+        existing.amount_cents !== order.total_amount_cents ||
+        existing.currency !== order.currency
+      ) {
         return {
           data: null,
           error: { message: "payment idempotency key conflict" },
@@ -1044,6 +1309,8 @@ function createFakeSupabase(
       id: `22222222-2222-4222-8222-00000000000${attemptCount}`,
       idempotency_key: args.p_idempotency_key,
       source_id: args.p_culqi_source_id,
+      amount_cents: order.total_amount_cents,
+      currency: order.currency,
       status: "created",
     };
     attempts.set(String(args.p_idempotency_key), attempt);
@@ -1052,6 +1319,7 @@ function createFakeSupabase(
 
   return {
     calls,
+    attempts,
     from(table: string) {
       return createFakeQuery(table, order, attempts);
     },
@@ -1155,7 +1423,11 @@ function createFakeSupabase(
           };
         }
 
-        if (attempt.status === "paid" || attempt.status === "failed") {
+        if (
+          ["paid", "failed", "expired", "cancelled"].includes(
+            String(attempt.status),
+          )
+        ) {
           return {
             data: {
               acquired: false,
@@ -1170,6 +1442,17 @@ function createFakeSupabase(
           return {
             data: null,
             error: { message: "transicion de intento de pago invalida" },
+          };
+        }
+
+        if (attempt.reconciliation_required === true) {
+          return {
+            data: {
+              acquired: false,
+              reason: "reconciliation_required",
+              payment_attempt: attemptResponse(attempt),
+            },
+            error: null,
           };
         }
 
@@ -1214,7 +1497,7 @@ function createFakeSupabase(
         if (args.p_provider_reference) {
           attempt.provider_reference = args.p_provider_reference;
         }
-        return { data: attemptResponse(attempt), error: null };
+        return { data: reconciliationResponse(attempt), error: null };
       }
 
       if (name === "finalize_kafka_payment_attempt") {
@@ -1243,7 +1526,7 @@ function createFakeSupabase(
         attempt.provider_reference = args.p_provider_reference;
         attempt.reconciliation_required = false;
         order.status = attempt.status === "paid" ? "paid" : "payment_failed";
-        return { data: attemptResponse(attempt), error: null };
+        return { data: reconciliationResponse(attempt), error: null };
       }
 
       if (name === "mark_kafka_payment_attempt_requires_3ds") {
@@ -1261,10 +1544,15 @@ function createFakeSupabase(
         attempt.three_ds_status = "required";
         attempt.provider_reference = args.p_provider_reference;
         attempt.reconciliation_required = false;
-        return { data: attemptResponse(attempt), error: null };
+        return { data: threeDsResponse(attempt), error: null };
       }
 
       if (name === "get_culqi_test_private_key_for_payment") {
+        if ((options.vaultFailuresRemaining ?? 0) > 0) {
+          options.vaultFailuresRemaining! -= 1;
+          return { data: null, error: { message: "TEST Vault unavailable" } };
+        }
+        await options.beforePrivateKey?.();
         if (args.p_store_id !== STORE_ID) {
           return {
             data: null,

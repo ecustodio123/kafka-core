@@ -495,7 +495,7 @@ async function processCulqiTestPaymentAttempt(
 
   const reservedAttempt = sessionReserve.payment_attempt;
 
-  if (sessionReserve.existing_attempt) {
+  if (sessionReserve.existing_attempt && reservedAttempt.status !== "created") {
     return paymentAttemptJsonResponse(
       reservedAttempt,
       {
@@ -508,6 +508,7 @@ async function processCulqiTestPaymentAttempt(
     );
   }
 
+  // A replay may recover a reservation that never acquired the processing claim.
   if (reservedAttempt.status !== "created") {
     return paymentAttemptJsonResponse(
       reservedAttempt,
@@ -561,7 +562,7 @@ async function processCulqiTestPaymentAttempt(
   const claim = claimResult.data as ClaimPaymentAttemptResponse;
   const processingAttempt = claim.payment_attempt;
 
-  if (!claim.acquired) {
+  if (claim.acquired !== true) {
     return paymentAttemptJsonResponse(
       processingAttempt,
       {
