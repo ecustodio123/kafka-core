@@ -51,6 +51,7 @@ type PaymentAttemptResponse = {
 };
 
 type ClaimPaymentAttemptResponse = {
+  authorized?: boolean;
   acquired: boolean;
   reason: string;
   payment_attempt: PaymentAttemptResponse;
@@ -544,10 +545,14 @@ async function processCulqiTestPaymentAttempt(
   }
 
   const claimResult = await supabase.rpc(
-    "claim_kafka_payment_attempt_processing",
+    "claim_payment_attempt_for_session",
     {
       p_store_id: payload.storeId,
       p_payment_attempt_id: reservedAttempt.id,
+      p_order_id: payload.orderId,
+      p_token_hash: paymentSessionTokenHash,
+      p_idempotency_key: payload.idempotencyKey,
+      p_culqi_source_id: payload.sourceId,
     },
   );
 
@@ -560,6 +565,13 @@ async function processCulqiTestPaymentAttempt(
   }
 
   const claim = claimResult.data as ClaimPaymentAttemptResponse;
+  if (claim?.authorized !== true) {
+    return jsonResponse(
+      { error: "Sesion de pago invalida." },
+      401,
+      corsHeaders,
+    );
+  }
   const processingAttempt = claim.payment_attempt;
 
   if (claim.acquired !== true) {

@@ -559,7 +559,7 @@ function createIntegratedSupabase() {
         return { data: "sk_test_integratedprivatekey", error: null };
       }
 
-      if (name === "claim_kafka_payment_attempt_processing") {
+      if (name === "claim_payment_attempt_for_session") {
         const attempt = Array.from(attempts.values()).find((item) =>
           item.id === args.p_payment_attempt_id
         );
@@ -569,10 +569,27 @@ function createIntegratedSupabase() {
           return { data: null, error: { message: "intento de pago invalido" } };
         }
 
+        const session = sessions.get(String(args.p_token_hash));
+        if (
+          !session || session.status !== "active" ||
+          session.store_id !== args.p_store_id ||
+          session.order_id !== args.p_order_id || order.id !== args.p_order_id
+        ) {
+          return {
+            data: {
+              authorized: false,
+              acquired: false,
+              reason: "invalid_session",
+            },
+            error: null,
+          };
+        }
+
         if (attempt.status === "processing") {
           return {
             data: {
               acquired: false,
+              authorized: true,
               reason: "already_processing",
               payment_attempt: attemptResponse(order, attempt),
             },
@@ -585,6 +602,7 @@ function createIntegratedSupabase() {
             data: {
               acquired: false,
               reason: "terminal_state",
+              authorized: true,
               payment_attempt: attemptResponse(order, attempt),
             },
             error: null,
@@ -596,6 +614,7 @@ function createIntegratedSupabase() {
             data: {
               acquired: false,
               reason: "reconciliation_required",
+              authorized: true,
               payment_attempt: attemptResponse(order, attempt),
             },
             error: null,
@@ -606,6 +625,7 @@ function createIntegratedSupabase() {
         return {
           data: {
             acquired: true,
+            authorized: true,
             reason: "claimed",
             payment_attempt: attemptResponse(order, attempt),
           },

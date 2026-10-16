@@ -19,6 +19,7 @@
     "test:payments:uncertainty:sql": "node --test scripts/payment-uncertainty.sql.test.mjs",
     "test:payments:reconciliation:sql": "node --test scripts/payment-reconciliation.sql.test.mjs",
     "test:payments:claim-hardening:sql": "node --test scripts/payment-claim-hardening.sql.test.mjs",
+    "test:payments:session-claim:sql": "node --test scripts/payment-session-claim.sql.test.mjs",
     "test:get-order-payment-status:unit": "npx -y deno@latest test --allow-env supabase/functions/get-order-payment-status/index_test.ts",
     "test:reconcile-payment-attempt:unit": "npx -y deno@latest test --no-lock --allow-env supabase/functions/reconcile-payment-attempt/index_test.ts",
     "test:payments:evidence:unit": "npx -y deno@latest test --no-lock supabase/functions/_shared/culqi-test-evidence_test.ts",

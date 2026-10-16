@@ -49,7 +49,7 @@ Deno.test("3DS HTTP 200 validates source, claims once and stays uncertain withou
   assertEquals(fake.calls.map((call) => call.name), [
     "validate_payment_attempt_source",
     "get_culqi_test_private_key_for_payment",
-    "claim_kafka_payment_attempt_3ds_completion",
+    "claim_payment_3ds_for_session",
     "record_kafka_payment_attempt_uncertainty",
   ]);
   assertNoSensitiveValues(body);
@@ -201,9 +201,8 @@ Deno.test("3DS concurrent duplicate requests acquire only one claim", async () =
   assertEquals(firstBody.payment_attempt.id, secondBody.payment_attempt.id);
   assertEquals(fetch.calls.length, 1);
   assertEquals(
-    fake.calls.filter((call) =>
-      call.name === "claim_kafka_payment_attempt_3ds_completion"
-    ).length,
+    fake.calls.filter((call) => call.name === "claim_payment_3ds_for_session")
+      .length,
     2,
   );
 });
@@ -275,9 +274,8 @@ Deno.test("3DS rejects source mismatches before claim and HTTP call", async () =
   assertMatch(body.error, /validacion/i);
   assertEquals(fetch.calls.length, 0);
   assertEquals(
-    fake.calls.filter((call) =>
-      call.name === "claim_kafka_payment_attempt_3ds_completion"
-    ).length,
+    fake.calls.filter((call) => call.name === "claim_payment_3ds_for_session")
+      .length,
     0,
   );
 });
@@ -570,6 +568,78 @@ Deno.test("3DS ambiguous 201 preserves the claim without finalization or a new P
   assertEquals(fetch.calls.length, 1);
 });
 
+Deno.test("3DS paid preflight returns only a generic response even after concurrent session revocation", async () => {
+  for (
+    const states of [{ orderStatus: "paid" }, { attemptStatus: "paid" }, {
+      orderStatus: "paid",
+      attemptStatus: "paid",
+    }]
+  ) {
+    for (const revokeSessionBeforeOrderRead of [false, true]) {
+      const fake = createFakeSupabase({
+        ...states,
+        revokeSessionBeforeOrderRead,
+      });
+      const fetch = createFakeFetch({ status: 200 });
+      assertEquals(fake.sessionStatus(), "active");
+      const response = await post(createTestHandler(fake, fetch));
+      const body = await response.json();
+      assertEquals(response.status, 409);
+      assertEquals(body, { error: "No se puede completar esta solicitud." });
+      assertEquals(
+        fake.sessionStatus(),
+        revokeSessionBeforeOrderRead ? "revoked" : "active",
+      );
+      assertEquals(fake.queries, [
+        "order_payment_sessions",
+        "orders",
+        "payment_attempts",
+      ]);
+      assertEquals(fake.calls.length, 0);
+      assertEquals(fetch.calls.length, 0);
+      assertNoSensitiveValues(body);
+    }
+  }
+});
+
+Deno.test("3DS atomic claim rejects a session invalidated after preflight without sending a charge", async () => {
+  const fake = createFakeSupabase({ claimSessionValid: false });
+  const fetch = createFakeFetch({ status: 200 });
+  const response = await post(createTestHandler(fake, fetch));
+  assertEquals(response.status, 401);
+  assertEquals(fetch.calls.length, 0);
+  assertEquals(
+    fake.calls.some((call) =>
+      call.name === "claim_kafka_payment_attempt_3ds_completion"
+    ),
+    false,
+  );
+  assertEquals(
+    fake.calls.some((call) => call.name === "claim_payment_3ds_for_session"),
+    true,
+  );
+  assertNoSensitiveValues(await response.json());
+});
+
+Deno.test("3DS atomic claim refuses pending reconciliation and nonliteral authorization", async () => {
+  for (
+    const options of [{ reconciliationRequired: true }, {
+      claimAuthorized: false,
+    }, { claimAuthorized: "true" }]
+  ) {
+    const fake = createFakeSupabase(options);
+    const fetch = createFakeFetch({ status: 200 });
+    const response = await post(createTestHandler(fake, fetch));
+    assertEquals(fetch.calls.length, 0);
+    const body = await response.json();
+    if (options.reconciliationRequired) {
+      assertEquals(body.payment_result.reason, "reconciliation_required");
+      assertEquals(body.payment_attempt.three_ds_status, "required");
+    } else assertEquals(response.status, 401);
+    assertNoSensitiveValues(body);
+  }
+});
+
 function createFakeSupabase(options: {
   providerReference?: string | null;
   uncertaintyError?: boolean;
@@ -580,11 +650,15 @@ function createFakeSupabase(options: {
   sourceValidationResult?: unknown;
   attemptStoreId?: number;
   claimAcquired?: boolean;
+  claimAuthorized?: unknown;
+  claimSessionValid?: boolean;
+  reconciliationRequired?: boolean;
   orderStatus?: string;
   privateKey?: string;
   sessionCreatedAt?: string;
   sessionExpiresAt?: string;
   sessionStatus?: string;
+  revokeSessionBeforeOrderRead?: boolean;
   sourceId?: string;
 } = {}) {
   const order = {
@@ -614,7 +688,7 @@ function createFakeSupabase(options: {
       : options.providerReference,
     requires_3ds: true,
     three_ds_status: "required",
-    reconciliation_required: false,
+    reconciliation_required: options.reconciliationRequired ?? false,
     created_at: "2026-10-13T00:00:00.000Z",
     updated_at: "2026-10-13T00:00:00.000Z",
   };
@@ -626,6 +700,7 @@ function createFakeSupabase(options: {
     created_at: options.sessionCreatedAt ?? "2026-10-13T00:00:00.000Z",
   };
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const queries: string[] = [];
 
   function attemptResponse() {
     return {
@@ -652,7 +727,14 @@ function createFakeSupabase(options: {
 
   return {
     calls,
+    queries,
+    sessionStatus: () => session.status,
     from(table: string) {
+      queries.push(table);
+      if (table === "orders" && options.revokeSessionBeforeOrderRead) {
+        // queryOrder runs only after the handler accepted the active session.
+        session.status = "revoked";
+      }
       return createFakeQuery(
         table,
         { attempt, order, session },
@@ -692,7 +774,36 @@ function createFakeSupabase(options: {
         };
       }
 
-      if (name === "claim_kafka_payment_attempt_3ds_completion") {
+      if (name === "claim_payment_3ds_for_session") {
+        const expectedHash = Array.from(
+          new Uint8Array(
+            await crypto.subtle.digest(
+              "SHA-256",
+              new TextEncoder().encode(PAYMENT_SESSION_TOKEN),
+            ),
+          ),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        ).join("");
+        if (
+          options.claimSessionValid === false ||
+          args.p_token_hash !== expectedHash ||
+          args.p_order_id !== ORDER_ID || args.p_store_id !== STORE_ID
+        ) {
+          return {
+            data: {
+              authorized: false,
+              acquired: false,
+              reason: "invalid_session",
+            },
+            error: null,
+          };
+        }
+        if (args.p_culqi_source_id !== attempt.source_id) {
+          return {
+            data: null,
+            error: { message: "payment idempotency key conflict" },
+          };
+        }
         if (
           args.p_payment_attempt_id !== attempt.id ||
           args.p_device_fingerprint_id !== DEVICE_FINGER_PRINT_ID ||
@@ -701,6 +812,7 @@ function createFakeSupabase(options: {
           return {
             data: {
               acquired: false,
+              authorized: options.claimAuthorized ?? true,
               reason: "already_processing",
               payment_attempt: attemptResponse(),
             },
@@ -708,6 +820,17 @@ function createFakeSupabase(options: {
           };
         }
 
+        if (attempt.reconciliation_required === true) {
+          return {
+            data: {
+              authorized: true,
+              acquired: false,
+              reason: "reconciliation_required",
+              payment_attempt: attemptResponse(),
+            },
+            error: null,
+          };
+        }
         if (options.claimAcquired === false) {
           attempt.three_ds_status = "completion_processing";
           attempt.reconciliation_required = true;
@@ -715,6 +838,7 @@ function createFakeSupabase(options: {
             data: {
               acquired: false,
               reason: "already_processing",
+              authorized: options.claimAuthorized ?? true,
               payment_attempt: attemptResponse(),
             },
             error: null,
@@ -726,6 +850,7 @@ function createFakeSupabase(options: {
         return {
           data: {
             acquired: true,
+            authorized: options.claimAuthorized ?? true,
             reason: "claimed",
             payment_attempt: attemptResponse(),
           },

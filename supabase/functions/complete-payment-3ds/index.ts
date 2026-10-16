@@ -52,6 +52,7 @@ type PaymentAttemptResponse = {
 };
 
 type ClaimPaymentAttemptResponse = {
+  authorized: boolean;
   acquired: boolean;
   reason: string;
   payment_attempt: PaymentAttemptResponse;
@@ -303,14 +304,9 @@ async function processCompletePayment3ds(
   }
 
   if (order.status === "paid" || attempt.status === "paid") {
-    return paymentAttemptJsonResponse(
-      buildExistingAttemptResponse(order, attempt),
-      {
-        mode: "culqi_test_3ds",
-        processed: false,
-        reason: "already_paid",
-      },
-      200,
+    return jsonResponse(
+      { error: "No se puede completar esta solicitud." },
+      409,
       corsHeaders,
     );
   }
@@ -386,11 +382,14 @@ async function processCompletePayment3ds(
   }
 
   const claimResult = await supabase.rpc(
-    "claim_kafka_payment_attempt_3ds_completion",
+    "claim_payment_3ds_for_session",
     {
       p_store_id: payload.storeId,
       p_payment_attempt_id: payload.paymentAttemptId,
       p_device_fingerprint_id: payload.deviceFingerPrintId,
+      p_order_id: payload.orderId,
+      p_token_hash: sessionTokenHash,
+      p_culqi_source_id: payload.sourceId,
     },
   );
 
@@ -403,6 +402,13 @@ async function processCompletePayment3ds(
   }
 
   const claim = claimResult.data as ClaimPaymentAttemptResponse;
+  if (claim?.authorized !== true) {
+    return jsonResponse(
+      { error: "Sesion de pago invalida." },
+      401,
+      corsHeaders,
+    );
+  }
   const claimedAttempt = claim.payment_attempt;
   if (claim.acquired !== true) {
     return paymentAttemptJsonResponse(
@@ -1000,32 +1006,6 @@ async function queryPaymentAttempt(
     .eq("order_id", orderId)
     .eq("id", paymentAttemptId)
     .maybeSingle();
-}
-
-function buildExistingAttemptResponse(
-  order: OrderRecord,
-  attempt: PaymentAttemptRecord,
-): PaymentAttemptResponse {
-  return {
-    id: attempt.id,
-    order_id: attempt.order_id,
-    store_id: attempt.store_id,
-    provider: attempt.provider,
-    environment: attempt.environment,
-    status: attempt.status,
-    order_status: order.status,
-    amount_cents: attempt.amount_cents,
-    currency: attempt.currency,
-    culqi_charge_id: attempt.culqi_charge_id,
-    failure_code: attempt.failure_code,
-    failure_message: attempt.failure_message,
-    provider_reference: attempt.provider_reference,
-    requires_3ds: attempt.requires_3ds,
-    three_ds_status: attempt.three_ds_status,
-    reconciliation_required: attempt.reconciliation_required,
-    created_at: attempt.created_at,
-    updated_at: attempt.updated_at,
-  };
 }
 
 async function safeReadJson(
