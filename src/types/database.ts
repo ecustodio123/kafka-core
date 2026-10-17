@@ -107,7 +107,29 @@ export type Database = {
       }
     }
     Views: {}
-    Functions: {}
+    Functions: {
+      create_product_idempotent: {
+        Args: {
+          p_store_id: number
+          p_operation_id: string
+          p_input: {
+            name: string
+            description: string
+            price: number
+            discount_active: boolean
+            discount_price: number | null
+            visual_rating: number | null
+            category_id: string | null
+            available: boolean
+          } | null
+        }
+        Returns: {
+          status: 'found' | 'not_found' | 'deleted'
+          product: Product | null
+          replayed?: boolean
+        }
+      }
+    }
     Enums: {}
     CompositeTypes: {}
   }

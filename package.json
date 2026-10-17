@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test:products:creation:unit": "node --test scripts/product-creation.unit.test.mjs",
+    "test:products:creation:sql": "node --test scripts/product-creation.sql.test.mjs",
     "configure:culqi-test": "node scripts/configure-culqi-test-settings.mjs",
     "test:create-order": "node --test scripts/create-order.integration.test.mjs",
     "test:create-order:unit": "npx -y deno@latest test --allow-env supabase/functions/create-order/index_test.ts",

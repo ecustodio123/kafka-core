@@ -1,24 +1,15 @@
 import { getSupabaseClient } from '../lib/supabase'
 import type {
   Product,
-  ProductInsert,
   ProductUpdate,
   Store,
 } from '../types/database'
+import { productCreationError, type ProductCreationInput, type ProductCreationResult } from './productCreation'
 
 const PRODUCT_COLUMNS =
   'id, store_id, name, description, price, discount_active, discount_price, visual_rating, image_path, category_id, available, active, created_at'
 
-export type ProductFormInput = {
-  name: string
-  description: string
-  price: number
-  discount_active: boolean
-  discount_price: number | null
-  visual_rating: number | null
-  category_id: string | null
-  available: boolean
-}
+export type ProductFormInput = ProductCreationInput
 
 export async function getProducts(storeId: Store['id']): Promise<Product[]> {
   const { data, error } = await getSupabaseClient()
@@ -36,32 +27,24 @@ export async function getProducts(storeId: Store['id']): Promise<Product[]> {
 
 export async function createProduct(
   storeId: Store['id'],
-  input: ProductFormInput,
-): Promise<Product> {
-  const payload: ProductInsert = {
-    store_id: storeId,
-    name: input.name,
-    description: input.description || null,
-    price: input.price,
-    discount_active: input.discount_active,
-    discount_price: input.discount_price,
-    visual_rating: input.visual_rating,
-    image_path: null,
-    category_id: input.category_id,
-    available: input.available,
-    active: true,
-  }
-
+  operationId: string,
+  input: ProductFormInput | null,
+): Promise<ProductCreationResult> {
   const { data, error } = await getSupabaseClient()
-    .from('products')
-    .insert(payload)
-    .select(PRODUCT_COLUMNS)
-    .single()
+    .rpc('create_product_idempotent', {
+      p_store_id: storeId,
+      p_operation_id: operationId,
+      p_input: input,
+    })
+    .abortSignal(AbortSignal.timeout(15000))
 
   if (error) {
-    throw new Error(error.message)
+    throw productCreationError(error)
   }
 
+  if (!data || !['found', 'not_found', 'deleted'].includes(data.status)) {
+    throw new Error('Respuesta de creacion no valida. No se repetira un INSERT tradicional.')
+  }
   return data
 }
 

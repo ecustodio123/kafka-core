@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, FormEvent, ReactNode, SetStateAction } from 'react'
 import {
   AlertCircle,
@@ -25,20 +25,10 @@ import {
   setProductAvailability,
   setProductImagePath,
   updateProduct,
-  type ProductFormInput,
 } from '../../services/products'
 import type { Category, Product, Store } from '../../types/database'
-
-type FormState = {
-  name: string
-  description: string
-  price: string
-  discount_active: boolean
-  discount_price: string
-  visual_rating: string
-  category_id: string
-  available: boolean
-}
+import { createProductCreationCoordinator } from '../../services/productCreation'
+import { parseProductForm, type ProductFormState as FormState } from './productForm'
 
 type Notice = {
   type: 'success' | 'error'
@@ -75,6 +65,16 @@ export function ProductsPage({ store }: { store: Store }) {
   const [editingProduct, setEditingProduct] = useState<Product | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm)
   const [imageFile, setImageFile] = useState<File | null>(null)
+  const saveInFlight = useRef(false)
+  const creation = useMemo(() => createProductCreationCoordinator(
+    store.owner_user_id ?? 'unassigned', store.id,
+    {
+      getItem: (key) => sessionStorage.getItem(key),
+      setItem: (key, value) => sessionStorage.setItem(key, value),
+      removeItem: (key) => sessionStorage.removeItem(key),
+    },
+    (operationId, input) => createProduct(store.id, operationId, input),
+  ), [store.id, store.owner_user_id])
 
   const loadProducts = useCallback(async () => {
     try {
@@ -110,15 +110,33 @@ export function ProductsPage({ store }: { store: Store }) {
     [products],
   )
 
-  function openCreateForm() {
-    setEditingProduct(null)
-    setForm(emptyForm)
-    setImageFile(null)
-    setIsFormOpen(true)
-    setNotice(null)
+  async function openCreateForm() {
+    if (saveInFlight.current) return
+    saveInFlight.current = true
+    setSaving(true)
+    try {
+      const recovered = await creation.recover()
+      if (recovered) {
+        replaceProduct(recovered)
+        openEditForm(recovered, true)
+        setNotice({ type: 'success', message: 'Producto recuperado. Puedes continuar editandolo.' })
+        return
+      }
+      setEditingProduct(null)
+      setForm(emptyForm)
+      setImageFile(null)
+      setIsFormOpen(true)
+      setNotice(null)
+    } catch (caughtError) {
+      setNotice({ type: 'error', message: getErrorMessage(caughtError) })
+    } finally {
+      saveInFlight.current = false
+      setSaving(false)
+    }
   }
 
-  function openEditForm(product: Product) {
+  function openEditForm(product: Product, recovering = false) {
+    if (saveInFlight.current && !recovering) return
     setEditingProduct(product)
     setForm({
       name: product.name,
@@ -140,7 +158,7 @@ export function ProductsPage({ store }: { store: Store }) {
   }
 
   function closeForm() {
-    if (saving) {
+    if (saveInFlight.current) {
       return
     }
 
@@ -152,20 +170,28 @@ export function ProductsPage({ store }: { store: Store }) {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (saveInFlight.current) return
 
-    const parsedInput = parseForm(form)
+    const parsedInput = parseProductForm(form, categories, store.id)
     if ('error' in parsedInput) {
       setNotice({ type: 'error', message: parsedInput.error })
       return
     }
 
+    saveInFlight.current = true
+    const wasEditing = Boolean(editingProduct)
+    let productSaved = false
     try {
       setSaving(true)
       setNotice(null)
 
       let savedProduct = editingProduct
         ? await updateProduct(store.id, editingProduct.id, parsedInput.value)
-        : await createProduct(store.id, parsedInput.value)
+        : await creation.create(parsedInput.value)
+      productSaved = true
+      // Persist the confirmed identity in UI before any later image operation.
+      setEditingProduct(savedProduct)
+      replaceProduct(savedProduct)
 
       if (imageFile) {
         const imagePath = await uploadProductImage({
@@ -182,19 +208,11 @@ export function ProductsPage({ store }: { store: Store }) {
         )
       }
 
-      setProducts((currentProducts) => {
-        if (!editingProduct) {
-          return [savedProduct, ...currentProducts]
-        }
-
-        return currentProducts.map((product) =>
-          product.id === savedProduct.id ? savedProduct : product,
-        )
-      })
+      replaceProduct(savedProduct)
 
       setNotice({
         type: 'success',
-        message: editingProduct
+        message: wasEditing
           ? 'Producto actualizado correctamente.'
           : 'Producto creado correctamente.',
       })
@@ -203,8 +221,11 @@ export function ProductsPage({ store }: { store: Store }) {
       setForm(emptyForm)
       setImageFile(null)
     } catch (caughtError) {
-      setNotice({ type: 'error', message: getErrorMessage(caughtError) })
+      setNotice({ type: 'error', message: productSaved
+        ? `Producto guardado; falta completar la imagen. ${getErrorMessage(caughtError)}`
+        : getErrorMessage(caughtError) })
     } finally {
+      saveInFlight.current = false
       setSaving(false)
     }
   }
@@ -243,9 +264,11 @@ export function ProductsPage({ store }: { store: Store }) {
 
   function replaceProduct(updatedProduct: Product) {
     setProducts((currentProducts) =>
-      currentProducts.map((product) =>
-        product.id === updatedProduct.id ? updatedProduct : product,
-      ),
+      currentProducts.some((product) => product.id === updatedProduct.id)
+        ? currentProducts.map((product) =>
+            product.id === updatedProduct.id ? updatedProduct : product,
+          )
+        : [updatedProduct, ...currentProducts],
     )
   }
 
@@ -265,7 +288,8 @@ export function ProductsPage({ store }: { store: Store }) {
 
         <button
           className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-          onClick={openCreateForm}
+          disabled={saving}
+          onClick={() => void openCreateForm()}
           type="button"
         >
           <Plus aria-hidden="true" size={18} />
@@ -341,7 +365,7 @@ export function ProductsPage({ store }: { store: Store }) {
             categories={categories}
             products={products}
             onAvailabilityChange={handleAvailabilityChange}
-            onEdit={openEditForm}
+            onEdit={(product) => openEditForm(product)}
           />
         )}
       </div>
@@ -377,6 +401,7 @@ function ProductForm({
       className="mb-5 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
       onSubmit={onSubmit}
     >
+      <fieldset className="min-w-0" disabled={saving}>
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
           <h3 className="text-base font-semibold text-slate-950">
@@ -563,6 +588,7 @@ function ProductForm({
           Guardar
         </button>
       </div>
+      </fieldset>
     </form>
   )
 }
@@ -972,68 +998,6 @@ function IconButton({
   )
 }
 
-function parseForm(
-  form: FormState,
-): { value: ProductFormInput } | { error: string } {
-  const name = form.name.trim()
-  const description = form.description.trim()
-  const price = Number(form.price)
-  const discountPrice = form.discount_price
-    ? Number(form.discount_price)
-    : null
-  const visualRating = Number(form.visual_rating)
-
-  if (!name) {
-    return { error: 'Ingresa el nombre del producto.' }
-  }
-
-  if (!Number.isFinite(price) || price < 0) {
-    return { error: 'Ingresa un precio valido mayor o igual a cero.' }
-  }
-
-  if (form.discount_active) {
-    if (
-      discountPrice === null ||
-      !Number.isFinite(discountPrice) ||
-      discountPrice <= 0
-    ) {
-      return { error: 'Ingresa un precio promocional mayor que cero.' }
-    }
-
-    if (discountPrice >= price) {
-      return {
-        error: 'El precio promocional debe ser menor que el precio original.',
-      }
-    }
-  }
-
-  if (
-    discountPrice !== null &&
-    (!Number.isFinite(discountPrice) || discountPrice <= 0 || discountPrice >= price)
-  ) {
-    return {
-      error: 'Si guardas un precio promocional, debe ser mayor que cero y menor que el precio original.',
-    }
-  }
-
-  if (!Number.isFinite(visualRating) || visualRating < 0 || visualRating > 5) {
-    return { error: 'La calificacion visual debe estar entre 0 y 5.' }
-  }
-
-  return {
-    value: {
-      name,
-      description,
-      price,
-      discount_active: form.discount_active,
-      discount_price: discountPrice,
-      visual_rating: roundToOneDecimal(visualRating),
-      category_id: form.category_id || null,
-      available: form.available,
-    },
-  }
-}
-
 function hasActiveDiscount(product: Product) {
   return Boolean(
     product.discount_active &&
@@ -1053,10 +1017,6 @@ function getDiscountPercent(originalPrice: number, discountPrice: number) {
 
 function clampRating(value: number) {
   return Math.min(5, Math.max(0, value))
-}
-
-function roundToOneDecimal(value: number) {
-  return Math.round(value * 10) / 10
 }
 
 function getSelectableCategories(
