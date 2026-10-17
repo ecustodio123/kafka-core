@@ -9,6 +9,10 @@
     "lint": "oxlint",
     "test:products:creation:unit": "node --test scripts/product-creation.unit.test.mjs",
     "test:products:creation:sql": "node --test scripts/product-creation.sql.test.mjs",
+    "test:products:images:unit": "node --test scripts/product-images.unit.test.mjs",
+    "test:products:images:browser": "playwright test --config tests/product-images/playwright.config.ts",
+    "test:products:images:sql": "node --test scripts/product-images.sql.test.mjs",
+    "test:products:images:typecheck": "tsc -p tests/product-images/tsconfig.json",
     "configure:culqi-test": "node scripts/configure-culqi-test-settings.mjs",
     "test:create-order": "node --test scripts/create-order.integration.test.mjs",
     "test:create-order:unit": "npx -y deno@latest test --allow-env supabase/functions/create-order/index_test.ts",
@@ -34,11 +38,13 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.3",
+    "image-size": "^2.0.4",
     "lucide-react": "^1.52.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",

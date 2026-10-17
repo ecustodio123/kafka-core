@@ -19,6 +19,8 @@ dist-ssr
 migration-backups/
 *.csv
 *.tsv
+test-results/
+playwright-report/
 
 # Editor directories and files
 .vscode/*

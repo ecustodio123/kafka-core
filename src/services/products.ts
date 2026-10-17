@@ -5,6 +5,7 @@ import type {
   Store,
 } from '../types/database'
 import { productCreationError, type ProductCreationInput, type ProductCreationResult } from './productCreation'
+import type { ImageLinkResult } from './productImageOperation'
 
 const PRODUCT_COLUMNS =
   'id, store_id, name, description, price, discount_active, discount_price, visual_rating, image_path, category_id, available, active, created_at'
@@ -90,9 +91,30 @@ export async function setProductAvailability(
 export async function setProductImagePath(
   storeId: Store['id'],
   productId: Product['id'],
-  imagePath: Product['image_path'],
-): Promise<Product> {
-  return updateProductField(storeId, productId, { image_path: imagePath })
+  imagePath: string,
+  expectedPath: Product['image_path'],
+): Promise<ImageLinkResult> {
+  try {
+    let request = getSupabaseClient().from('products')
+      .update({ image_path: imagePath }).eq('id', productId).eq('store_id', storeId)
+    request = expectedPath === null ? request.is('image_path', null) : request.eq('image_path', expectedPath)
+    const { data, error } = await request.select(PRODUCT_COLUMNS)
+      .abortSignal(AbortSignal.timeout(15000)).maybeSingle()
+    if (!error && data) return { status: 'linked', product: data }
+  } catch { /* An aborted response does not prove rollback. Read before retrying. */ }
+  try {
+    const current = await getProduct(storeId, productId)
+    if (current?.image_path === imagePath) return { status: 'linked', product: current }
+    if (current && current.image_path !== expectedPath) return { status: 'conflict', product: current }
+    return { status: 'uncertain', product: current }
+  } catch { return { status: 'uncertain', product: null } }
+}
+
+export async function getProduct(storeId: number, productId: number): Promise<Product | null> {
+  const { data, error } = await getSupabaseClient().from('products').select(PRODUCT_COLUMNS)
+    .eq('id', productId).eq('store_id', storeId).abortSignal(AbortSignal.timeout(15000)).maybeSingle()
+  if (error) throw new Error('No se pudo consultar el producto.')
+  return data
 }
 
 async function updateProductField(

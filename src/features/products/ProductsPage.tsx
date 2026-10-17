@@ -16,15 +16,17 @@ import {
 } from 'lucide-react'
 import {
   getProductImageUrl,
-  uploadProductImage,
+  productImageCoordinator,
 } from '../../services/productImages'
+import { prepareProductImage, type PreparedProductImage } from '../../services/productImagePreparation'
+import type { ProductImageOperation } from '../../services/productImageOperation'
 import { listCategories } from '../../services/categories'
 import {
   createProduct,
   getProducts,
   setProductAvailability,
-  setProductImagePath,
   updateProduct,
+  type ProductFormInput,
 } from '../../services/products'
 import type { Category, Product, Store } from '../../types/database'
 import { createProductCreationCoordinator } from '../../services/productCreation'
@@ -50,6 +52,10 @@ const currencyFormatter = new Intl.NumberFormat('es-PE', {
   style: 'currency',
   currency: 'PEN',
 })
+const imagePhaseLabels = {
+  prepared: 'Preparada', uploading: 'Subiendo', uploaded: 'Subida confirmada', linking: 'Vinculando',
+  linked: 'Vinculada', uncertain: 'Verificacion pendiente', conflict: 'Conflicto',
+}
 
 export function ProductsPage({ store }: { store: Store }) {
   const [products, setProducts] = useState<Product[]>([])
@@ -65,7 +71,16 @@ export function ProductsPage({ store }: { store: Store }) {
   const [editingProduct, setEditingProduct] = useState<Product | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm)
   const [imageFile, setImageFile] = useState<File | null>(null)
+  const [preparedImage, setPreparedImage] = useState<PreparedProductImage | null>(null)
+  const [invalidImageSelection, setInvalidImageSelection] = useState(false)
+  const [imageOperation, setImageOperation] = useState<ProductImageOperation | null>(null)
   const saveInFlight = useRef(false)
+  const confirmedSave = useRef<{
+    storeId: number; ownerId: Store['owner_user_id']; productId: number; input: ProductFormInput
+  } | null>(null)
+  const images = useMemo(() => productImageCoordinator(
+    store.owner_user_id ?? 'unassigned', store.id, setImageOperation,
+  ), [store.id, store.owner_user_id])
   const creation = useMemo(() => createProductCreationCoordinator(
     store.owner_user_id ?? 'unassigned', store.id,
     {
@@ -123,8 +138,12 @@ export function ProductsPage({ store }: { store: Store }) {
         return
       }
       setEditingProduct(null)
+      confirmedSave.current = null
       setForm(emptyForm)
       setImageFile(null)
+      setPreparedImage(null)
+      setInvalidImageSelection(false)
+      setImageOperation(null)
       setIsFormOpen(true)
       setNotice(null)
     } catch (caughtError) {
@@ -137,6 +156,13 @@ export function ProductsPage({ store }: { store: Store }) {
 
   function openEditForm(product: Product, recovering = false) {
     if (saveInFlight.current && !recovering) return
+    try {
+      setImageOperation(images.load(product.id))
+    } catch (caughtError) {
+      setNotice({ type: 'error', message: getErrorMessage(caughtError) })
+      return
+    }
+    confirmedSave.current = null
     setEditingProduct(product)
     setForm({
       name: product.name,
@@ -153,6 +179,8 @@ export function ProductsPage({ store }: { store: Store }) {
       available: product.available,
     })
     setImageFile(null)
+    setPreparedImage(null)
+    setInvalidImageSelection(false)
     setIsFormOpen(true)
     setNotice(null)
   }
@@ -163,9 +191,73 @@ export function ProductsPage({ store }: { store: Store }) {
     }
 
     setIsFormOpen(false)
+    confirmedSave.current = null
     setEditingProduct(null)
     setForm(emptyForm)
     setImageFile(null)
+    setPreparedImage(null)
+    setInvalidImageSelection(false)
+    setImageOperation(null)
+  }
+
+  async function handleImageChange(file: File | null) {
+    if (saveInFlight.current) return
+    if (!file) {
+      setImageFile(null)
+      setPreparedImage(null)
+      setInvalidImageSelection(false)
+      return
+    }
+    saveInFlight.current = true
+    setSaving(true)
+    try {
+      const prepared = await prepareProductImage(file)
+      if (imageOperation && imageOperation.phase !== 'linked') {
+        if (prepared.sha256 !== imageOperation.sha256 || prepared.size !== imageOperation.size) {
+          throw new Error('Hay otra imagen pendiente. Reintenta o descarta ese cambio antes de seleccionar una distinta.')
+        }
+        prepared.selectionId = imageOperation.selectionId
+      }
+      setImageFile(file)
+      setPreparedImage(prepared)
+      setInvalidImageSelection(false)
+      setNotice(null)
+    } catch (caughtError) {
+      setInvalidImageSelection(true)
+      setNotice({ type: 'error', message: getErrorMessage(caughtError) })
+    } finally {
+      saveInFlight.current = false
+      setSaving(false)
+    }
+  }
+
+  async function retryImage() {
+    if (saveInFlight.current || !editingProduct || !imageOperation) return
+    saveInFlight.current = true
+    setSaving(true)
+    try {
+      const result = await images.run(editingProduct.id, preparedImage ?? undefined)
+      if (result.product) { setEditingProduct(result.product); replaceProduct(result.product) }
+      if (result.status === 'linked') {
+        setImageOperation(null)
+        setPreparedImage(null)
+        setImageFile(null)
+      }
+      setNotice({ type: result.status === 'linked' ? 'success' : 'error', message: result.message })
+    } catch (caughtError) {
+      setNotice({ type: 'error', message: getErrorMessage(caughtError) })
+    } finally { saveInFlight.current = false; setSaving(false) }
+  }
+
+  function discardImage() {
+    if (saveInFlight.current || !editingProduct) return
+    try {
+      images.discard(editingProduct.id)
+      setImageOperation(null)
+      setPreparedImage(null)
+      setImageFile(null)
+      setNotice({ type: 'success', message: 'Cambio descartado. Los archivos almacenados se conservaron.' })
+    } catch (caughtError) { setNotice({ type: 'error', message: getErrorMessage(caughtError) }) }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -180,32 +272,40 @@ export function ProductsPage({ store }: { store: Store }) {
 
     saveInFlight.current = true
     const wasEditing = Boolean(editingProduct)
-    let productSaved = false
+    let phase: 'validation' | 'product' | 'image' = 'validation'
     try {
       setSaving(true)
       setNotice(null)
 
-      let savedProduct = editingProduct
+      if ((imageFile || invalidImageSelection) && !preparedImage) throw new Error('Selecciona una imagen valida o quita la seleccion antes de guardar.')
+      if (imageOperation && imageOperation.phase !== 'linked') {
+        throw new Error('Hay una imagen pendiente. Usa Reintentar imagen antes de guardar otros cambios.')
+      }
+      const confirmed = confirmedSave.current
+      const sameConfirmedInput = editingProduct && confirmed
+        && confirmed.storeId === store.id && confirmed.ownerId === store.owner_user_id
+        && confirmed.productId === editingProduct.id
+        && (Object.keys(parsedInput.value) as (keyof ProductFormInput)[])
+          .every((key) => parsedInput.value[key] === confirmed.input[key])
+      phase = 'product'
+      let savedProduct = sameConfirmedInput ? editingProduct : editingProduct
         ? await updateProduct(store.id, editingProduct.id, parsedInput.value)
         : await creation.create(parsedInput.value)
-      productSaved = true
+      confirmedSave.current = {
+        storeId: store.id, ownerId: store.owner_user_id, productId: savedProduct.id,
+        input: { ...parsedInput.value },
+      }
       // Persist the confirmed identity in UI before any later image operation.
       setEditingProduct(savedProduct)
       replaceProduct(savedProduct)
 
-      if (imageFile) {
-        const imagePath = await uploadProductImage({
-          file: imageFile,
-          productName: savedProduct.name,
-          productId: savedProduct.id,
-          storeSlug: store.slug,
-          storeId: store.id,
-        })
-        savedProduct = await setProductImagePath(
-          store.id,
-          savedProduct.id,
-          imagePath,
-        )
+      if (preparedImage && imageFile) {
+        phase = 'image'
+        images.begin(savedProduct, store.slug, preparedImage, editingProduct?.image_path ?? null)
+        const result = await images.run(savedProduct.id, preparedImage)
+        if (result.product) { setEditingProduct(result.product); replaceProduct(result.product) }
+        if (result.status !== 'linked' || !result.product) throw new Error(result.message)
+        savedProduct = result.product
       }
 
       replaceProduct(savedProduct)
@@ -217,13 +317,18 @@ export function ProductsPage({ store }: { store: Store }) {
           : 'Producto creado correctamente.',
       })
       setIsFormOpen(false)
+      confirmedSave.current = null
       setEditingProduct(null)
       setForm(emptyForm)
       setImageFile(null)
+      setPreparedImage(null)
+      setImageOperation(null)
     } catch (caughtError) {
-      setNotice({ type: 'error', message: productSaved
+      setNotice({ type: 'error', message: phase === 'image'
         ? `Producto guardado; falta completar la imagen. ${getErrorMessage(caughtError)}`
-        : getErrorMessage(caughtError) })
+        : phase === 'product'
+          ? `No se pudieron guardar los datos del producto. ${getErrorMessage(caughtError)}`
+          : getErrorMessage(caughtError) })
     } finally {
       saveInFlight.current = false
       setSaving(false)
@@ -231,6 +336,7 @@ export function ProductsPage({ store }: { store: Store }) {
   }
 
   async function handleAvailabilityChange(product: Product) {
+    if (saveInFlight.current) return
     await runProductAction(product.id, async () => {
       const updatedProduct = await setProductAvailability(
         store.id,
@@ -314,7 +420,10 @@ export function ProductsPage({ store }: { store: Store }) {
           categories={categories}
           editingProduct={editingProduct}
           imageFile={imageFile}
-          onImageChange={setImageFile}
+          imageOperation={imageOperation}
+          onImageChange={(file) => void handleImageChange(file)}
+          onRetryImage={() => void retryImage()}
+          onDiscardImage={discardImage}
           onCancel={closeForm}
           onSubmit={handleSubmit}
         />
@@ -381,6 +490,9 @@ function ProductForm({
   categories,
   editingProduct,
   imageFile,
+  imageOperation,
+  onRetryImage,
+  onDiscardImage,
   onImageChange,
   onCancel,
   onSubmit,
@@ -392,10 +504,14 @@ function ProductForm({
   categories: Category[]
   editingProduct: Product | null
   imageFile: File | null
+  imageOperation: ProductImageOperation | null
+  onRetryImage: () => void
+  onDiscardImage: () => void
   onImageChange: (file: File | null) => void
   onCancel: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
+  const imageInput = useRef<HTMLInputElement>(null)
   return (
     <form
       className="mb-5 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
@@ -492,7 +608,8 @@ function ProductForm({
 
         <DiscountFields form={form} setForm={setForm} />
 
-        <Field label="Imagen" htmlFor="product-image">
+        <div className="block">
+          <label className="mb-1.5 block text-sm font-semibold text-slate-700" htmlFor="product-image">Imagen</label>
           <div className="rounded-md border border-dashed border-slate-300 px-3 py-3">
             <label
               className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
@@ -503,29 +620,47 @@ function ProductForm({
             </label>
             <input
               accept="image/png,image/jpeg,image/webp"
+              aria-label="Imagen de producto"
               className="sr-only"
               id="product-image"
+              ref={imageInput}
               onChange={(event) =>
                 onImageChange(event.target.files?.[0] ?? null)
               }
               type="file"
             />
-            <p className="mt-2 text-xs text-slate-500">
+            <p className="mt-2 break-all text-xs text-slate-500">
               {imageFile
                 ? imageFile.name
-                : 'PNG, JPG o WebP. Se guardara como image.webp.'}
+                : 'PNG, JPG o WebP. Maximo 5 MB; hasta 4096 px por lado y 12 megapixeles.'}
             </p>
             {imageFile ? (
               <button
                 className="mt-2 text-xs font-medium text-slate-700 underline"
-                onClick={() => onImageChange(null)}
+                onClick={() => {
+                  if (imageInput.current) imageInput.current.value = ''
+                  onImageChange(null)
+                }}
                 type="button"
               >
                 Quitar seleccion
               </button>
             ) : null}
+            {imageOperation && imageOperation.phase !== 'linked' ? (
+              <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-200 pt-3" role="status">
+                <p className="text-sm text-slate-600">Imagen pendiente: {imagePhaseLabels[imageOperation.phase]}</p>
+                <div className="flex shrink-0 gap-2">
+                  <button aria-label="Reintentar imagen" title="Reintentar imagen" className="rounded-md border border-slate-300 p-2" type="button" onClick={onRetryImage}>
+                    <RefreshCw aria-hidden="true" size={16} />
+                  </button>
+                  <button aria-label="Descartar cambio de imagen" title="Descartar cambio sin borrar archivos" className="rounded-md border border-slate-300 p-2" type="button" onClick={onDiscardImage}>
+                    <X aria-hidden="true" size={16} />
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
-        </Field>
+        </div>
 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
           <Field label="Calificacion visual" htmlFor="product-rating">

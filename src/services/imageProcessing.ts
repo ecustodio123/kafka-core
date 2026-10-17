@@ -12,22 +12,36 @@ export function validateImageFile(file: File, maxSizeBytes: number) {
   }
 }
 
-export async function convertImageToWebp(file: File): Promise<Blob> {
+export type ImageConversionLimits = {
+  maxDimension: number
+  maxPixels: number
+  outputDimension: number
+}
+
+export async function convertImageToWebp(file: File, limits?: ImageConversionLimits): Promise<Blob> {
   const image = await loadImage(file)
+  if (limits && (!image.naturalWidth || !image.naturalHeight
+    || image.naturalWidth > limits.maxDimension || image.naturalHeight > limits.maxDimension
+    || image.naturalWidth * image.naturalHeight > limits.maxPixels)) {
+    throw new Error('Las dimensiones de la imagen superan el limite permitido.')
+  }
   const canvas = document.createElement('canvas')
-  canvas.width = image.naturalWidth
-  canvas.height = image.naturalHeight
+  const scale = limits ? Math.min(1, limits.outputDimension / Math.max(image.naturalWidth, image.naturalHeight)) : 1
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
 
   const context = canvas.getContext('2d')
   if (!context) {
     throw new Error('No se pudo preparar la imagen para subirla.')
   }
 
-  context.drawImage(image, 0, 0)
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
 
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => {
+        canvas.width = 0
+        canvas.height = 0
         if (!blob) {
           reject(new Error('No se pudo convertir la imagen a WebP.'))
           return

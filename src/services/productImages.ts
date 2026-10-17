@@ -1,10 +1,9 @@
 import { getSupabaseClient } from '../lib/supabase'
-import { convertImageToWebp, validateImageFile } from './imageProcessing'
-import { slugifyPathSegment } from './pathSlugs'
-import type { Product, Store } from '../types/database'
+import { getProduct, setProductImagePath } from './products'
+import { imageDigest, MAX_PRODUCT_IMAGE_BYTES } from './productImagePreparation'
+import { createProductImageCoordinator, validImageOperation, type ProductImageOperation } from './productImageOperation'
 
 const PRODUCT_IMAGES_BUCKET = 'product-images'
-const MAX_PRODUCT_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
 
 export function getProductImageUrl(imagePath: string) {
   const { data } = getSupabaseClient()
@@ -15,40 +14,65 @@ export function getProductImageUrl(imagePath: string) {
   return data.publicUrl
 }
 
-export async function uploadProductImage({
-  file,
-  productName,
-  productId,
-  storeSlug,
-  storeId,
-}: {
-  file: File
-  productName: Product['name']
-  productId: Product['id']
-  storeSlug: Store['slug']
-  storeId: Store['id']
-}) {
-  validateImageFile(file, MAX_PRODUCT_IMAGE_SIZE_BYTES)
-  const imageBlob = await convertImageToWebp(file)
-  const imagePath = [
-    `${storeId}-${slugifyPathSegment(storeSlug)}`,
-    'products',
-    `${productId}-${slugifyPathSegment(productName)}`,
-    `principal-${Date.now()}.webp`,
-  ].join('/')
+function validateOperation(o: ProductImageOperation) {
+  if (!validImageOperation(o, o.ownerId, o.storeId, o.productId)) throw new Error('Operacion no valida.')
+}
 
-  const { error } = await getSupabaseClient()
-    .storage
-    .from(PRODUCT_IMAGES_BUCKET)
-    .upload(imagePath, imageBlob, {
-      cacheControl: '3600',
-      contentType: 'image/webp',
-      upsert: true,
-    })
+async function upload(o: ProductImageOperation, blob: Blob) {
+  validateOperation(o)
+  if (blob.type !== 'image/webp' || blob.size !== o.size || blob.size > MAX_PRODUCT_IMAGE_BYTES
+    || await imageDigest(await blob.arrayBuffer()) !== o.sha256) throw new Error('Archivo no coincidente.')
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const result = await Promise.race([
+      getSupabaseClient().storage.from(PRODUCT_IMAGES_BUCKET).upload(o.candidatePath, blob, {
+        cacheControl: '3600', contentType: 'image/webp', upsert: false,
+      }),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Subida incierta.')), 15000) }),
+    ])
+    if (result.error) throw new Error('No se pudo confirmar la subida.')
+  } finally { clearTimeout(timer) }
+}
 
-  if (error) {
-    throw new Error(`No se pudo subir la imagen: ${error.message}`)
-  }
+async function verify(o: ProductImageOperation): Promise<'match' | 'absent' | 'different' | 'unknown'> {
+  validateOperation(o)
+  try {
+    const { data, error } = await getSupabaseClient().storage.from(PRODUCT_IMAGES_BUCKET)
+      .download(o.candidatePath, { cacheNonce: crypto.randomUUID() }, {
+        cache: 'no-store', signal: AbortSignal.timeout(15000),
+      }).asStream()
+    if (error) {
+      const coded = error as { status?: number; code?: string }
+      return coded.status === 404 && coded.code === 'NoSuchKey' ? 'absent' : 'unknown'
+    }
+    if (!data) return 'unknown'
+    const reader = data.getReader()
+    const bytes = new Uint8Array(o.size)
+    let length = 0
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (!(value instanceof Uint8Array) || length + value.length > bytes.length) {
+          await reader.cancel()
+          return 'different'
+        }
+        bytes.set(value, length)
+        length += value.length
+      }
+    } finally { reader.releaseLock() }
+    return length === o.size && await imageDigest(bytes.buffer) === o.sha256 ? 'match' : 'different'
+  } catch { return 'unknown' }
+}
 
-  return imagePath
+export function productImageCoordinator(ownerId: string, storeId: number,
+  changed: (operation: ProductImageOperation) => void) {
+  return createProductImageCoordinator(ownerId, storeId, {
+    getItem: (key) => sessionStorage.getItem(key),
+    setItem: (key, value) => sessionStorage.setItem(key, value),
+    removeItem: (key) => sessionStorage.removeItem(key),
+  }, {
+    readProduct: (id) => getProduct(storeId, id), upload, verify,
+    link: (o) => setProductImagePath(storeId, o.productId, o.candidatePath, o.expectedPath),
+  }, changed)
 }
