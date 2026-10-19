@@ -1,4 +1,4 @@
-import type { Category } from '../../types/database.ts'
+import type { Category, Product } from '../../types/database.ts'
 import type { ProductCreationInput } from '../../services/productCreation.ts'
 
 export type ProductFormState = {
@@ -10,6 +10,19 @@ export type ProductFormState = {
   visual_rating: string
   category_id: string
   available: boolean
+}
+
+export function productFormFromProduct(product: Product): ProductFormState {
+  return {
+    name: product.name,
+    description: product.description ?? '',
+    price: String(product.price),
+    discount_active: product.discount_active,
+    discount_price: product.discount_price === null ? '' : String(product.discount_price),
+    visual_rating: product.visual_rating === null ? '5' : String(product.visual_rating),
+    category_id: product.category_id ?? '',
+    available: product.available,
+  }
 }
 
 function fitsDecimalPlaces(value: number, places: number) {
@@ -27,7 +40,7 @@ export function parseProductForm(
   const name = form.name.trim()
   const description = form.description.trim()
   const price = Number(form.price)
-  const discountPrice = form.discount_price ? Number(form.discount_price) : null
+  const discountPrice = form.discount_price.trim() ? Number(form.discount_price) : null
   const visualRating = Number(form.visual_rating)
 
   if (!name || [...name].length > 120) {
@@ -55,7 +68,7 @@ export function parseProductForm(
   if (!Number.isFinite(visualRating) || visualRating < 0 || visualRating > 5) {
     return { error: 'La calificacion visual debe estar entre 0 y 5.' }
   }
-  const categoryId = form.category_id || null
+  const categoryId = form.category_id.toLowerCase() || null
   if (categoryId !== null && (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId)
     || !categories.some((category) => category.id.toLowerCase() === categoryId.toLowerCase()
       && category.store_id === storeId))) {

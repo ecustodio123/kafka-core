@@ -1,8 +1,9 @@
 import { expect, test, type Page } from '@playwright/test'
+import type { Product } from '../../src/types/database'
 
 const original = { id: 7, store_id: 1, name: 'LOCAL PRODUCT', description: '', price: 20,
   discount_active: false, discount_price: null, visual_rating: 5, category_id: null,
-  image_path: '1/7/image.webp', available: true, active: true, created_at: '2026-10-17T00:00:00Z' }
+  image_path: '1/7/image.webp', available: true, active: true, created_at: '2026-10-17T00:00:00Z' } satisfies Product
 const smallWebp = Buffer.from('UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA', 'base64')
 
 async function png(page: Page, width = 64, height = 32) {
@@ -15,11 +16,11 @@ async function png(page: Page, width = 64, height = 32) {
   return Buffer.from(data)
 }
 
-async function harness(page: Page) {
-  const db = { product: { ...original } }
+async function harness(page: Page, initial: Partial<Product> = {}) {
+  const db = { product: { ...original, ...initial } }
   const files = new Map<string, Buffer>([[original.image_path, smallWebp]])
   const pendingUploads = new Map<string, Buffer>()
-  const calls = { create: 0, metadata: 0, upload: 0, link: 0, remove: 0, external: 0, uploadPaths: [] as string[] }
+  const calls = { create: 0, metadata: 0, upload: 0, link: 0, productReads: 0, remove: 0, external: 0, uploadPaths: [] as string[] }
   const behavior = { failLink: 0, failUpload: 0, failMetadata: 0, loseUpload: false, loseLink: false, changeAfterUpload: false }
   await page.route('**/*', async (route) => {
     const request = route.request(); const url = new URL(request.url())
@@ -34,9 +35,13 @@ async function harness(page: Page) {
       return respond({ status: 'found', product: db.product, replayed: false })
     }
     if (url.pathname === '/rest/v1/products') {
-      if (request.method() === 'GET') return respond([db.product])
+      if (request.method() === 'GET') {
+        if (url.searchParams.has('id')) calls.productReads++
+        return respond([db.product])
+      }
       const patch = request.postDataJSON()
       if ('image_path' in patch) {
+        expect(Object.keys(patch)).toEqual(['image_path'])
         calls.link++
         expect(url.searchParams.get('store_id')).toBe('eq.1')
         expect(url.searchParams.get('id')).toBe(`eq.${db.product.id}`)
@@ -170,6 +175,7 @@ for (const recovery of ['same-form', 'refresh', 'close-form'] as const) {
     await page.getByRole('button', { name: 'Reintentar imagen' }).click()
     await expect(page.getByText('Imagen vinculada correctamente.')).toBeVisible()
     expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(2)
+    expect(f.calls.metadata).toBe(0)
     expect(f.files.has(original.image_path)).toBe(true)
     expect(f.calls.remove).toBe(0); expect(f.calls.external).toBe(0)
   })
@@ -196,6 +202,7 @@ test('concurrent change after upload causes conflict without overwriting the oth
   await page.getByRole('button', { name: 'Guardar', exact: true }).click()
   await expect(page.getByText('Imagen pendiente: Conflicto')).toBeVisible()
   expect(f.db.product.image_path).toBe('1/7/other-session.webp'); expect(f.calls.link).toBe(0)
+  expect(f.calls.metadata).toBe(0)
   await page.reload()
   await page.getByRole('button', { name: 'Editar producto' }).click()
   await page.getByRole('button', { name: 'Reintentar imagen' }).click()
@@ -374,4 +381,125 @@ test('invalid replacement of a pending selection retains its hash, UUID and retr
   await page.getByRole('button', { name: 'Reintentar imagen', exact: true }).click()
   await expect(page.getByText('Imagen vinculada correctamente.')).toBeVisible()
   expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(2)
+})
+
+for (const mode of ['image', 'metadata', 'both'] as const) {
+  test(`edit ${mode}: sends only necessary writes and retains image verification reads`, async ({ page }) => {
+    const f = await harness(page)
+    await page.getByRole('button', { name: 'Editar producto' }).click()
+    if (mode !== 'image') await page.getByLabel('Precio', { exact: true }).fill('25')
+    if (mode !== 'metadata') {
+      await page.locator('#product-image').setInputFiles({ name: 'valid.png', mimeType: 'image/png', buffer: await png(page) })
+    }
+    await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+    await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+    await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+    expect(f.calls.metadata).toBe(mode === 'image' ? 0 : 1)
+    expect(f.calls.upload).toBe(mode === 'metadata' ? 0 : 1)
+    expect(f.calls.link).toBe(mode === 'metadata' ? 0 : 1)
+    expect(f.calls.productReads).toBe(mode === 'metadata' ? 0 : 2)
+    expect(f.db.product.price).toBe(mode === 'image' ? 20 : 25)
+    expect(f.calls.create + f.calls.remove + f.calls.external).toBe(0)
+  })
+}
+
+test('equivalent normalized form preserves stored NULLs and does not write metadata', async ({ page }) => {
+  const f = await harness(page, { description: null, visual_rating: null })
+  await page.getByRole('button', { name: 'Editar producto' }).click()
+  await page.getByLabel('Nombre', { exact: true }).fill('  LOCAL PRODUCT  ')
+  await page.getByLabel('Descripcion', { exact: true }).fill('   ')
+  await page.getByLabel('Precio', { exact: true }).fill('20.00')
+  await page.locator('#product-rating').fill('5.0')
+  await page.locator('#product-image').setInputFiles({ name: 'valid.png', mimeType: 'image/png', buffer: await png(page) })
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+  expect(f.calls.metadata).toBe(0); expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1)
+  expect(f.db.product.description).toBeNull(); expect(f.db.product.visual_rating).toBeNull()
+  expect(f.db.product.category_id).toBeNull(); expect(f.db.product.discount_price).toBeNull()
+})
+
+for (const discount_active of [false, true]) {
+  test(`equivalent discount/rating formatting with discount_active=${discount_active} does not write`, async ({ page }) => {
+    const f = await harness(page, { discount_active, discount_price: 15, visual_rating: 4.5 })
+    await page.getByRole('button', { name: 'Editar producto' }).click()
+    if (!discount_active) await page.getByRole('checkbox', { name: 'Sin oferta' }).check()
+    await page.getByLabel('Precio promocional', { exact: true }).fill('15.00')
+    if (!discount_active) await page.getByRole('checkbox', { name: 'Oferta activa' }).uncheck()
+    await page.locator('#product-rating').fill('4.50')
+    await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+    await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+    expect(f.calls.metadata + f.calls.upload + f.calls.link + f.calls.create).toBe(0)
+    expect(f.db.product.discount_active).toBe(discount_active); expect(f.db.product.discount_price).toBe(15)
+  })
+}
+
+test('changing metadata and restoring its initial values does not write', async ({ page }) => {
+  const f = await harness(page)
+  await page.getByRole('button', { name: 'Editar producto' }).click()
+  await page.getByLabel('Nombre', { exact: true }).fill('TEMPORARY CHANGE')
+  await page.getByLabel('Precio', { exact: true }).fill('25')
+  await page.getByLabel('Nombre', { exact: true }).fill(original.name)
+  await page.getByLabel('Precio', { exact: true }).fill('20.00')
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+  expect(f.calls.metadata + f.calls.upload + f.calls.link + f.calls.create).toBe(0)
+})
+
+test('image-only save preserves concurrent metadata edits from another session', async ({ page }) => {
+  const f = await harness(page)
+  await page.getByRole('button', { name: 'Editar producto' }).click()
+  Object.assign(f.db.product, { name: 'OTHER SESSION', price: 35, description: 'Remote edit', available: false })
+  await page.locator('#product-image').setInputFiles({ name: 'valid.png', mimeType: 'image/png', buffer: await png(page) })
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+  expect(f.calls.metadata).toBe(0); expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1)
+  expect(f.db.product).toMatchObject({ name: 'OTHER SESSION', price: 35, description: 'Remote edit', available: false })
+})
+
+test('image-only images.begin failure retries without INSERT or metadata UPDATE, then permits a real edit', async ({ page }) => {
+  const f = await harness(page)
+  await page.getByRole('button', { name: 'Editar producto' }).click()
+  await page.locator('#product-image').setInputFiles({ name: 'valid.png', mimeType: 'image/png', buffer: await png(page) })
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await page.evaluate(() => {
+    const setItem = Storage.prototype.setItem
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (key.startsWith('kafka.product-image.')) {
+        Storage.prototype.setItem = setItem
+        throw new DOMException('LOCAL metadata unavailable', 'QuotaExceededError')
+      }
+      return setItem.call(this, key, value)
+    }
+  })
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText(/Producto guardado; falta completar la imagen/)).toBeVisible()
+  expect(f.calls.create + f.calls.metadata + f.calls.upload + f.calls.link).toBe(0)
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+  expect(f.calls.create + f.calls.metadata).toBe(0)
+  expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1)
+  await page.getByRole('button', { name: 'Editar producto' }).click()
+  await page.getByLabel('Precio', { exact: true }).fill('30')
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+  expect(f.calls.metadata).toBe(1); expect(f.db.product.price).toBe(30)
+  expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1)
+})
+
+test('failed metadata save does not advance the baseline or upload an image', async ({ page }) => {
+  const f = await harness(page); f.behavior.failMetadata = 1
+  await page.getByRole('button', { name: 'Editar producto' }).click()
+  await page.getByLabel('Precio', { exact: true }).fill('25')
+  await page.locator('#product-image').setInputFiles({ name: 'valid.png', mimeType: 'image/png', buffer: await png(page) })
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText(/No se pudieron guardar los datos del producto/)).toBeVisible()
+  expect(f.calls.metadata).toBe(1); expect(f.db.product.price).toBe(20)
+  expect(f.calls.upload + f.calls.link).toBe(0)
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+  expect(f.calls.metadata).toBe(2); expect(f.db.product.price).toBe(25)
+  expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1)
 })

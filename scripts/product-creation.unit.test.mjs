@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createProductCreationCoordinator, productCreationError } from '../src/services/productCreation.ts';
-import { parseProductForm } from '../src/features/products/productForm.ts';
+import { parseProductForm, productFormFromProduct } from '../src/features/products/productForm.ts';
 
 const uuid = '11111111-1111-4111-8111-111111111111';
 const input = { name: 'LOCAL', description: 'catalog description', price: 20,
@@ -172,9 +172,34 @@ test('form category must be a UUID in the current store list; no category is NUL
   const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   assert.equal(parseProductForm(form, [], 1).value.category_id, null);
   assert.equal(parseProductForm({ ...form, category_id: id }, [{ id, store_id: 1 }], 1).value.category_id, id);
+  assert.equal(parseProductForm({ ...form, category_id: id.toUpperCase() }, [{ id, store_id: 1 }], 1).value.category_id, id);
   assert.ok('error' in parseProductForm({ ...form, category_id: id }, [{ id, store_id: 2 }], 1));
   assert.ok('error' in parseProductForm({ ...form, category_id: id }, [], 1));
   assert.ok('error' in parseProductForm({ ...form, category_id: 'invalid' }, [], 1));
+});
+
+test('edit baseline uses normalized display values without mutating nullable product fields', () => {
+  const row = { ...product, description: null, visual_rating: null };
+  const initial = productFormFromProduct(row);
+  assert.equal(initial.description, ''); assert.equal(initial.visual_rating, '5');
+  const baseline = parseProductForm(initial, [], 1);
+  const equivalent = parseProductForm({ ...initial, name: ' LOCAL ', description: '   ',
+    price: '20.00', discount_price: '   ', visual_rating: '5.0' }, [], 1);
+  assert.ok('value' in baseline); assert.deepEqual(equivalent, baseline);
+  assert.equal(row.description, null); assert.equal(row.visual_rating, null);
+});
+
+test('edit baseline compares discount amounts even when inactive and recognizes genuine edits', () => {
+  for (const discount_active of [false, true]) {
+    const initial = productFormFromProduct({ ...product, discount_active, discount_price: 15, visual_rating: 4.5 });
+    const baseline = parseProductForm(initial, [], 1);
+    assert.ok('value' in baseline);
+    assert.deepEqual(parseProductForm({ ...initial, discount_price: '15.00', visual_rating: '4.50' }, [], 1), baseline);
+    for (const patch of [{ discount_price: '14' }, { price: '21' }, { visual_rating: '4' },
+      { available: false }, { discount_active: !discount_active }]) {
+      assert.notDeepEqual(parseProductForm({ ...initial, ...patch }, [], 1), baseline);
+    }
+  }
 });
 
 test('form enforces SQL name/description length limits before submitting', () => {

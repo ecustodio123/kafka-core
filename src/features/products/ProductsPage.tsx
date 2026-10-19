@@ -30,7 +30,7 @@ import {
 } from '../../services/products'
 import type { Category, Product, Store } from '../../types/database'
 import { createProductCreationCoordinator } from '../../services/productCreation'
-import { parseProductForm, type ProductFormState as FormState } from './productForm'
+import { parseProductForm, productFormFromProduct, type ProductFormState as FormState } from './productForm'
 
 type Notice = {
   type: 'success' | 'error'
@@ -162,22 +162,15 @@ export function ProductsPage({ store }: { store: Store }) {
       setNotice({ type: 'error', message: getErrorMessage(caughtError) })
       return
     }
-    confirmedSave.current = null
+    const nextForm = productFormFromProduct(product)
+    const normalized = parseProductForm(nextForm, categories, store.id)
+    // Compare against the form's initial meaning, including display-only defaults.
+    confirmedSave.current = 'value' in normalized ? {
+      storeId: store.id, ownerId: store.owner_user_id, productId: product.id,
+      input: normalized.value,
+    } : null
     setEditingProduct(product)
-    setForm({
-      name: product.name,
-      description: product.description ?? '',
-      price: String(product.price),
-      discount_active: product.discount_active,
-      discount_price: product.discount_price === null
-        ? ''
-        : String(product.discount_price),
-      visual_rating: product.visual_rating === null
-        ? '5'
-        : String(product.visual_rating),
-      category_id: product.category_id ?? '',
-      available: product.available,
-    })
+    setForm(nextForm)
     setImageFile(null)
     setPreparedImage(null)
     setInvalidImageSelection(false)
@@ -291,9 +284,11 @@ export function ProductsPage({ store }: { store: Store }) {
       let savedProduct = sameConfirmedInput ? editingProduct : editingProduct
         ? await updateProduct(store.id, editingProduct.id, parsedInput.value)
         : await creation.create(parsedInput.value)
-      confirmedSave.current = {
-        storeId: store.id, ownerId: store.owner_user_id, productId: savedProduct.id,
-        input: { ...parsedInput.value },
+      if (!sameConfirmedInput) {
+        confirmedSave.current = {
+          storeId: store.id, ownerId: store.owner_user_id, productId: savedProduct.id,
+          input: { ...parsedInput.value },
+        }
       }
       // Persist the confirmed identity in UI before any later image operation.
       setEditingProduct(savedProduct)
