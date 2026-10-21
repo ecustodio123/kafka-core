@@ -17,3 +17,7 @@ verify_jwt = false
 # No public checkout authorization; independent diagnostic flag defaults to disabled.
 [functions.reconcile-payment-attempt]
 verify_jwt = false
+
+# Auth.getUser and live owner/role checks in SQL; no public/anonymous deletion.
+[functions.catalog-delete]
+verify_jwt = false

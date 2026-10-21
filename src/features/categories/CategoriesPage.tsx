@@ -1,5 +1,7 @@
 import { Toggle } from '../../components/Toggle'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { CatalogDeletionRecovery } from '../../components/CatalogDeletionRecovery'
+import { cleanupCatalogImages, cleanupMessage, deleteCatalogEntity } from '../../services/catalogDeletion'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import {
   AlertCircle,
@@ -13,6 +15,7 @@ import {
   PowerOff,
   RefreshCw,
   Save,
+  Trash2,
   X,
 } from 'lucide-react'
 import {
@@ -26,7 +29,6 @@ import {
   type CategoryProductCounts,
 } from '../../services/categories'
 import {
-  deleteCategoryImageByUrl,
   uploadCategoryImage,
   validateCategoryImageFile,
 } from '../../services/categoryImages'
@@ -52,6 +54,8 @@ const emptyForm: FormState = {
 }
 
 export function CategoriesPage({ store }: { store: Store }) {
+  const busy = useRef(false)
+  const [deletionRevision, setDeletionRevision] = useState(0)
   const [categories, setCategories] = useState<Category[]>([])
   const [productCounts, setProductCounts] = useState<CategoryProductCounts>({})
   const [loading, setLoading] = useState(true)
@@ -97,6 +101,7 @@ export function CategoriesPage({ store }: { store: Store }) {
   )
 
   function openCreateForm() {
+    if (busy.current) return
     setEditingCategory(null)
     setForm(emptyForm)
     resetImageState()
@@ -106,6 +111,7 @@ export function CategoriesPage({ store }: { store: Store }) {
   }
 
   function openEditForm(category: Category) {
+    if (busy.current) return
     setEditingCategory(category)
     setForm({
       name: category.name,
@@ -184,6 +190,7 @@ export function CategoriesPage({ store }: { store: Store }) {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (busy.current) return
 
     const parsedInput = parseForm(form)
     if ('error' in parsedInput) {
@@ -191,6 +198,7 @@ export function CategoriesPage({ store }: { store: Store }) {
       return
     }
 
+    busy.current = true
     try {
       setSaving(true)
       setNotice(null)
@@ -198,6 +206,8 @@ export function CategoriesPage({ store }: { store: Store }) {
       let savedCategory = editingCategory
         ? await updateCategory(store.id, editingCategory.id, parsedInput.value)
         : await createCategory(store.id, parsedInput.value)
+      setEditingCategory(savedCategory)
+      setCategories(current => sortCategories([...current.filter(row => row.id !== savedCategory.id), savedCategory]))
       let cleanupWarning: string | null = null
 
       if (imageFile) {
@@ -210,26 +220,16 @@ export function CategoriesPage({ store }: { store: Store }) {
           storeId: store.id,
         })
 
-        try {
-          savedCategory = await setCategoryImageUrl(
-            store.id,
-            savedCategory.id,
-            uploadedImage.imageUrl,
-          )
-        } catch (caughtError) {
-          await deleteCategoryImageByUrl({
-            imageUrl: uploadedImage.imageUrl,
-            storeId: store.id,
-          })
-          throw caughtError
-        }
+        savedCategory = await setCategoryImageUrl(
+          store.id,
+          savedCategory.id,
+          uploadedImage.imageUrl,
+        )
 
         if (previousImageUrl && previousImageUrl !== uploadedImage.imageUrl) {
           try {
-            await deleteCategoryImageByUrl({
-              imageUrl: previousImageUrl,
-              storeId: store.id,
-            })
+            const cleanup = await cleanupCatalogImages(store.id, 'category', savedCategory.id)
+            if (cleanup.cleanup !== 'complete') cleanupWarning = cleanupMessage(cleanup)
           } catch (caughtError) {
             cleanupWarning = getErrorMessage(caughtError)
           }
@@ -238,21 +238,15 @@ export function CategoriesPage({ store }: { store: Store }) {
         savedCategory = await setCategoryImageUrl(store.id, savedCategory.id, null)
 
         try {
-          await deleteCategoryImageByUrl({
-            imageUrl: editingCategory.image_url,
-            storeId: store.id,
-          })
+          const cleanup = await cleanupCatalogImages(store.id, 'category', savedCategory.id)
+          if (cleanup.cleanup !== 'complete') cleanupWarning = cleanupMessage(cleanup)
         } catch (caughtError) {
           cleanupWarning = getErrorMessage(caughtError)
         }
       }
 
       setCategories((currentCategories) => {
-        const nextCategories = editingCategory
-          ? currentCategories.map((category) =>
-              category.id === savedCategory.id ? savedCategory : category,
-            )
-          : [...currentCategories, savedCategory]
+        const nextCategories = [...currentCategories.filter(category => category.id !== savedCategory.id), savedCategory]
 
         return sortCategories(nextCategories)
       })
@@ -271,11 +265,13 @@ export function CategoriesPage({ store }: { store: Store }) {
     } catch (caughtError) {
       setNotice({ type: 'error', message: getErrorMessage(caughtError) })
     } finally {
+      busy.current = false
       setSaving(false)
     }
   }
 
   async function handleActiveChange(category: Category) {
+    if (busy.current) return
     const count = productCounts[category.id] ?? 0
     if (
       category.active &&
@@ -287,6 +283,7 @@ export function CategoriesPage({ store }: { store: Store }) {
       return
     }
 
+    busy.current = true
     try {
       setActionCategoryId(category.id)
       setNotice(null)
@@ -313,8 +310,24 @@ export function CategoriesPage({ store }: { store: Store }) {
     } catch (caughtError) {
       setNotice({ type: 'error', message: getErrorMessage(caughtError) })
     } finally {
+      busy.current = false
       setActionCategoryId(null)
     }
+  }
+
+  async function handleDelete(category: Category) {
+    if (busy.current || isFormOpen) return
+    if ((productCounts[category.id] ?? 0) > 0) {
+      setNotice({ type: 'error', message: 'No puedes eliminar una categoria con productos asociados.' }); return
+    }
+    if (!window.confirm(`Eliminar la categoria "${category.name}"? No se eliminaran productos. La imagen solo se borrara si es seguro.`)) return
+    busy.current = true; setSaving(true); setActionCategoryId(category.id)
+    try {
+      const result = await deleteCatalogEntity(store.id, 'category', category.id)
+      setCategories(current => current.filter(row => row.id !== category.id))
+      setNotice({ type: result.cleanup === 'pending' ? 'error' : 'success', message: `Categoria eliminada. ${cleanupMessage(result)}` })
+    } catch (caught) { setNotice({ type: 'error', message: getErrorMessage(caught) }) }
+    finally { busy.current = false; setSaving(false); setActionCategoryId(null); setDeletionRevision(n => n + 1) }
   }
 
   return (
@@ -351,6 +364,9 @@ export function CategoriesPage({ store }: { store: Store }) {
       </div>
 
       {notice ? <NoticeBanner notice={notice} /> : null}
+      <CatalogDeletionRecovery storeId={store.id} kind="category" revision={deletionRevision} disabled={saving || isFormOpen || actionCategoryId !== null}
+        onBusyChange={value => { busy.current = value; setSaving(value) }}
+        onDeleted={id => setCategories(current => current.filter(row => row.id !== id))} />
 
       {isFormOpen ? (
         <CategoryForm
@@ -415,6 +431,8 @@ export function CategoriesPage({ store }: { store: Store }) {
             productCounts={productCounts}
             onActiveChange={handleActiveChange}
             onEdit={openEditForm}
+            onDelete={handleDelete}
+            deletionDisabled={saving || isFormOpen || actionCategoryId !== null}
           />
         )}
       </div>
@@ -592,12 +610,16 @@ function CategoryTable({
   productCounts,
   onActiveChange,
   onEdit,
+  onDelete,
+  deletionDisabled,
 }: {
   actionCategoryId: Category['id'] | null
   categories: Category[]
   productCounts: CategoryProductCounts
   onActiveChange: (category: Category) => void
   onEdit: (category: Category) => void
+  onDelete: (category: Category) => void
+  deletionDisabled: boolean
 }) {
   return (
     <div className="overflow-x-auto">
@@ -645,6 +667,9 @@ function CategoryTable({
                     onClick={() => onEdit(category)}
                   >
                     <Pencil aria-hidden="true" size={16} />
+                  </IconButton>
+                  <IconButton label="Eliminar categoria" disabled={deletionDisabled} onClick={() => onDelete(category)}>
+                    <Trash2 aria-hidden="true" size={16} />
                   </IconButton>
                   <IconButton
                     label={
@@ -793,18 +818,20 @@ function IconButton({
   children,
   label,
   loading = false,
+  disabled = false,
   onClick,
 }: {
   children: ReactNode
   label: string
   loading?: boolean
+  disabled?: boolean
   onClick: () => void
 }) {
   return (
     <button
       aria-label={label}
       className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-300 text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
-      disabled={loading}
+      disabled={loading || disabled}
       onClick={onClick}
       title={label}
       type="button"

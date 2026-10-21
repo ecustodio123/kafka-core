@@ -26,6 +26,10 @@ async function harness(page: Page, initial: Partial<Product> = {}) {
     const request = route.request(); const url = new URL(request.url())
     if (url.origin !== 'http://127.0.0.1:5197') { calls.external++; return route.abort() }
     const respond = (json: unknown, status = 200) => route.fulfill({ status, json })
+    if (url.pathname === '/functions/v1/catalog-delete') {
+      expect(request.postDataJSON().action).toBe('cleanup')
+      return respond({ deleted: false, cleanup: 'complete' })
+    }
     if (request.method() === 'DELETE' || request.method() === 'PUT') { calls.remove++; return route.abort() }
     if (url.pathname === '/rest/v1/categories') return respond([])
     if (url.pathname === '/rest/v1/rpc/create_product_idempotent') {
@@ -155,10 +159,10 @@ for (const recovery of ['same-form', 'refresh', 'close-form'] as const) {
     expect(f.db.product.image_path).toBe(original.image_path)
     expect(f.calls.upload).toBe(1)
     if (recovery === 'same-form') {
-      await page.getByRole('status').scrollIntoViewIfNeeded()
+      await page.getByRole('status').filter({ hasText: 'Imagen pendiente:' }).scrollIntoViewIfNeeded()
       await page.screenshot({ path: testInfo.outputPath('pending-image-desktop.png') })
       await page.setViewportSize({ width: 375, height: 900 })
-      await page.getByRole('status').scrollIntoViewIfNeeded()
+      await page.getByRole('status').filter({ hasText: 'Imagen pendiente:' }).scrollIntoViewIfNeeded()
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
       await page.screenshot({ path: testInfo.outputPath('pending-image-mobile.png') })
     }

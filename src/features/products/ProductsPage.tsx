@@ -1,4 +1,6 @@
 import { Toggle } from '../../components/Toggle'
+import { CatalogDeletionRecovery } from '../../components/CatalogDeletionRecovery'
+import { cleanupCatalogImages, cleanupMessage, deleteCatalogEntity } from '../../services/catalogDeletion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, FormEvent, ReactNode, SetStateAction } from 'react'
 import {
@@ -13,6 +15,7 @@ import {
   Save,
   Star,
   Tag,
+  Trash2,
   X,
 } from 'lucide-react'
 import {
@@ -68,6 +71,7 @@ export function ProductsPage({ store }: { store: Store }) {
   )
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
+  const [cleanupNotice, setCleanupNotice] = useState<string | null>(null)
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [editingProduct, setEditingProduct] = useState<Product | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm)
@@ -76,6 +80,7 @@ export function ProductsPage({ store }: { store: Store }) {
   const [invalidImageSelection, setInvalidImageSelection] = useState(false)
   const [imageOperation, setImageOperation] = useState<ProductImageOperation | null>(null)
   const saveInFlight = useRef(false)
+  const [deletionRevision, setDeletionRevision] = useState(0)
   const confirmedSave = useRef<{
     storeId: number; ownerId: Store['owner_user_id']; productId: number; input: ProductFormInput
   } | null>(null)
@@ -236,6 +241,10 @@ export function ProductsPage({ store }: { store: Store }) {
         setImageOperation(null)
         setPreparedImage(null)
         setImageFile(null)
+        if (imageOperation.expectedPath) {
+          try { const cleanup = await cleanupCatalogImages(store.id, 'product', String(editingProduct.id)); setCleanupNotice(cleanupMessage(cleanup)) }
+          catch { setCleanupNotice('Imagen vinculada. Limpieza anterior pendiente de backend; los archivos se conservaron.') }
+        }
       }
       setNotice({ type: result.status === 'linked' ? 'success' : 'error', message: result.message })
     } catch (caughtError) {
@@ -302,6 +311,10 @@ export function ProductsPage({ store }: { store: Store }) {
         if (result.product) { setEditingProduct(result.product); replaceProduct(result.product) }
         if (result.status !== 'linked' || !result.product) throw new Error(result.message)
         savedProduct = result.product
+        if (editingProduct?.image_path) try {
+          const cleanup = await cleanupCatalogImages(store.id, 'product', String(savedProduct.id))
+          setCleanupNotice(cleanupMessage(cleanup))
+        } catch { setCleanupNotice('Producto guardado. Limpieza anterior pendiente de backend; los archivos se conservaron.') }
       }
 
       replaceProduct(savedProduct)
@@ -349,10 +362,29 @@ export function ProductsPage({ store }: { store: Store }) {
     })
   }
 
+  async function handleDelete(product: Product) {
+    if (saveInFlight.current || isFormOpen || actionProductId !== null) return
+    if (!window.confirm(`Eliminar el producto "${product.name}"? La imagen solo se eliminara si el backend verifica que no esta compartida.`)) return
+    saveInFlight.current = true
+    setSaving(true)
+    setActionProductId(product.id)
+    try {
+      const pending = images.load(product.id)
+      if (pending && pending.phase !== 'linked') throw new Error('Hay una imagen pendiente. Resuelve o descarta ese cambio antes de eliminar.')
+      const result = await deleteCatalogEntity(store.id, 'product', String(product.id))
+      if (result.deleted !== true) throw new Error('Eliminacion no confirmada.')
+      setProducts(current => current.filter(row => row.id !== product.id))
+      setNotice({ type: result.cleanup === 'pending' ? 'error' : 'success', message: `Producto eliminado. ${cleanupMessage(result)}` })
+    } catch (caught) { setNotice({ type: 'error', message: getErrorMessage(caught) }) }
+    finally { saveInFlight.current = false; setSaving(false); setActionProductId(null); setDeletionRevision(n => n + 1) }
+  }
+
   async function runProductAction(
     productId: Product['id'],
     action: () => Promise<void>,
   ) {
+    if (saveInFlight.current) return
+    saveInFlight.current = true
     try {
       setActionProductId(productId)
       setNotice(null)
@@ -360,6 +392,7 @@ export function ProductsPage({ store }: { store: Store }) {
     } catch (caughtError) {
       setNotice({ type: 'error', message: getErrorMessage(caughtError) })
     } finally {
+      saveInFlight.current = false
       setActionProductId(null)
     }
   }
@@ -406,6 +439,10 @@ export function ProductsPage({ store }: { store: Store }) {
       </div>
 
       {notice ? <NoticeBanner notice={notice} /> : null}
+      {cleanupNotice && <p role="status" className="mb-4 border-l-4 border-amber-500 bg-amber-50 p-3 text-sm">{cleanupNotice}</p>}
+      <CatalogDeletionRecovery storeId={store.id} kind="product" revision={deletionRevision} disabled={saving || isFormOpen || actionProductId !== null}
+        onBusyChange={busy => { saveInFlight.current = busy; setSaving(busy) }}
+        onDeleted={id => setProducts(current => current.filter(row => String(row.id) !== id))} />
 
       {isFormOpen ? (
         <ProductForm
@@ -471,6 +508,8 @@ export function ProductsPage({ store }: { store: Store }) {
             products={products}
             onAvailabilityChange={handleAvailabilityChange}
             onEdit={(product) => openEditForm(product)}
+            onDelete={handleDelete}
+            deletionDisabled={saving || isFormOpen || actionProductId !== null}
           />
         )}
       </div>
@@ -822,12 +861,16 @@ function ProductTable({
   products,
   onAvailabilityChange,
   onEdit,
+  onDelete,
+  deletionDisabled,
 }: {
   actionProductId: Product['id'] | null
   categories: Category[]
   products: Product[]
   onAvailabilityChange: (product: Product) => void
   onEdit: (product: Product) => void
+  onDelete: (product: Product) => void
+  deletionDisabled: boolean
 }) {
   const categoryById = new Map(
     categories.map((category) => [category.id, category]),
@@ -893,6 +936,9 @@ function ProductTable({
                     onClick={() => onAvailabilityChange(product)}
                   >
                     <CheckCircle2 aria-hidden="true" size={16} />
+                  </IconButton>
+                  <IconButton label="Eliminar producto" disabled={deletionDisabled} onClick={() => onDelete(product)}>
+                    <Trash2 aria-hidden="true" size={16} />
                   </IconButton>
                 </div>
               </td>
@@ -1082,18 +1128,20 @@ function IconButton({
   children,
   label,
   loading = false,
+  disabled = false,
   onClick,
 }: {
   children: ReactNode
   label: string
   loading?: boolean
+  disabled?: boolean
   onClick: () => void
 }) {
   return (
     <button
       aria-label={label}
       className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-300 text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
-      disabled={loading}
+      disabled={loading || disabled}
       onClick={onClick}
       title={label}
       type="button"
