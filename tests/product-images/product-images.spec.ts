@@ -16,19 +16,20 @@ async function png(page: Page, width = 64, height = 32) {
   return Buffer.from(data)
 }
 
-async function harness(page: Page, initial: Partial<Product> = {}) {
+async function harness(page: Page, initial: Partial<Product> = {}, catalogSize = 1) {
   const db = { product: { ...original, ...initial } }
   const files = new Map<string, Buffer>([[original.image_path, smallWebp]])
   const pendingUploads = new Map<string, Buffer>()
   const calls = { create: 0, metadata: 0, upload: 0, link: 0, productReads: 0, remove: 0, external: 0, uploadPaths: [] as string[] }
-  const behavior = { failLink: 0, failUpload: 0, failMetadata: 0, loseUpload: false, loseLink: false, changeAfterUpload: false }
+  const behavior = { failLink: 0, failUpload: 0, failMetadata: 0, loseUpload: false, loseLink: false, changeAfterUpload: false, cleanupPending: false, cleanupError: false }
   await page.route('**/*', async (route) => {
     const request = route.request(); const url = new URL(request.url())
     if (url.origin !== 'http://127.0.0.1:5197') { calls.external++; return route.abort() }
     const respond = (json: unknown, status = 200) => route.fulfill({ status, json })
     if (url.pathname === '/functions/v1/catalog-delete') {
       expect(request.postDataJSON().action).toBe('cleanup')
-      return respond({ deleted: false, cleanup: 'complete' })
+      if (behavior.cleanupError) return respond({ error: 'LOCAL private cleanup error' }, 503)
+      return respond({ deleted: false, cleanup: behavior.cleanupPending ? 'pending' : 'complete' })
     }
     if (request.method() === 'DELETE' || request.method() === 'PUT') { calls.remove++; return route.abort() }
     if (url.pathname === '/rest/v1/categories') return respond([])
@@ -41,7 +42,8 @@ async function harness(page: Page, initial: Partial<Product> = {}) {
     if (url.pathname === '/rest/v1/products') {
       if (request.method() === 'GET') {
         if (url.searchParams.has('id')) calls.productReads++
-        return respond([db.product])
+        return respond(url.searchParams.has('id') ? [db.product] : Array.from({ length: catalogSize }, (_, index) =>
+          index === 0 ? db.product : { ...db.product, id: original.id + index, name: `LOCAL PRODUCT ${index + 1}` }))
       }
       const patch = request.postDataJSON()
       if ('image_path' in patch) {
@@ -92,6 +94,24 @@ async function harness(page: Page, initial: Partial<Product> = {}) {
   await page.goto('/tests/product-images/browser.html')
   await expect(page.getByText('LOCAL PRODUCT', { exact: true })).toBeVisible()
   return { db, files, pendingUploads, calls, behavior }
+}
+
+for (const mobile of [false, true]) {
+  test(`edit from the bottom automatically scrolls to the product form (${mobile ? 'mobile, reduced motion' : 'desktop'})`, async ({ page }) => {
+    await page.setViewportSize(mobile ? { width: 375, height: 812 } : { width: 1280, height: 800 })
+    await page.emulateMedia({ reducedMotion: mobile ? 'reduce' : 'no-preference' })
+    const f = await harness(page, {}, 30)
+    const edit = page.getByRole('button', { name: 'Editar producto', exact: true }).last()
+    await edit.scrollIntoViewIfNeeded()
+    expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(500)
+    await edit.click()
+    await expect(page.getByLabel('Nombre', { exact: true })).toHaveValue('LOCAL PRODUCT 30')
+    await expect.poll(async () => {
+      const box = await page.getByRole('heading', { name: 'Editar producto', exact: true }).boundingBox()
+      return box !== null && box.y >= 0 && box.y + box.height < 200
+    }).toBe(true)
+    expect(f.calls.create + f.calls.metadata + f.calls.upload + f.calls.link + f.calls.remove).toBe(0)
+  })
 }
 
 test('real canvas conversion bounds product output and preserves category default dimensions', async ({ page }) => {
@@ -386,6 +406,25 @@ test('invalid replacement of a pending selection retains its hash, UUID and retr
   await expect(page.getByText('Imagen vinculada correctamente.')).toBeVisible()
   expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(2)
 })
+
+for (const mode of ['cleanupPending', 'cleanupError'] as const) {
+  test(`replacement ${mode}: successful save stays clean and technical details go only to a sanitized warning`, async ({ page }) => {
+    const warnings: string[] = []
+    page.on('console', message => { if (message.type() === 'warning') warnings.push(message.text()) })
+    const f = await harness(page); f.behavior[mode] = true
+    await page.getByRole('button', { name: 'Editar producto' }).click()
+    await page.locator('#product-image').setInputFiles({ name: 'valid.png', mimeType: 'image/png', buffer: await png(page) })
+    await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+    await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+    await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+    await expect(page.getByText(/limpieza|Storage|backend|LOCAL private/i)).toHaveCount(0)
+    expect(warnings).toEqual([mode === 'cleanupPending'
+      ? 'Catalog image cleanup requires review. {status: pending}'
+      : 'Catalog image cleanup could not be confirmed.'])
+    expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1); expect(f.calls.remove).toBe(0)
+    expect(f.files.has(original.image_path)).toBe(true)
+  })
+}
 
 for (const mode of ['image', 'metadata', 'both'] as const) {
   test(`edit ${mode}: sends only necessary writes and retains image verification reads`, async ({ page }) => {

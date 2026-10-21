@@ -24,11 +24,11 @@ export async function pendingCatalogDeletions(storeId: number, kind: CatalogKind
 export async function deleteCatalogEntity(storeId: number, kind: CatalogKind, id: string): Promise<CatalogDeleteResult> {
   const key = `${await scope(storeId, kind)}${id}`
   const existing = sessionStorage.getItem(key)
-  if (existing && !uuid.test(existing)) throw new Error('La operacion pendiente no es valida. No se envio una eliminacion.')
+  if (existing && !uuid.test(existing)) throw new Error('No se pudo eliminar. Actualiza la página antes de volver a intentarlo.')
   const operation = existing ?? crypto.randomUUID()
   sessionStorage.setItem(key, operation) // Before HTTP; no payload, image URL or credential is persisted.
   const result = await invoke({ action: 'delete', store_id: storeId, kind, entity_id: id, operation_id: operation })
-  if (result.deleted !== true) throw new Error('Eliminacion no confirmada.')
+  if (result.deleted !== true) throw new Error('No se pudo confirmar la eliminación. Actualiza la lista antes de volver a intentarlo.')
   if (['complete', 'retained_unverified'].includes(result.cleanup)) {
     try { sessionStorage.removeItem(key) } catch { /* The confirmed deletion can safely be replayed. */ }
   }
@@ -43,18 +43,18 @@ async function invoke(body: Record<string, unknown>): Promise<CatalogDeleteResul
     if ('context' in error && error.context instanceof Response) {
       try {
         const result = await error.context.json()
-        if (result.error === 'La categoria tiene productos o existen referencias que impiden eliminar.') throw new Error(result.error)
-      } catch (caught) { if (caught instanceof Error && caught.message.startsWith('La categoria tiene productos')) throw caught }
+        if (result.error === 'La categoria tiene productos o existen referencias que impiden eliminar.') throw new Error('No se puede eliminar la categoría porque tiene productos asociados o está en uso.')
+      } catch (caught) { if (caught instanceof Error && caught.message === 'No se puede eliminar la categoría porque tiene productos asociados o está en uso.') throw caught }
     }
-    throw new Error('No se confirmo la operacion backend. Reintenta con la misma operacion; puede faltar el despliegue o la migracion.')
+    throw new Error('No se pudo confirmar la eliminación. Actualiza la lista antes de volver a intentarlo.')
   }
   if (!data || typeof data.deleted !== 'boolean' || !['complete', 'pending', 'retained_shared', 'retained_unverified'].includes(data.cleanup)) {
-    throw new Error('Respuesta no confirmada. Conserva la operacion pendiente antes de reintentar.')
+    throw new Error('No se pudo confirmar la eliminación. Actualiza la lista antes de volver a intentarlo.')
   }
   return data
 }
-export function cleanupMessage(result: CatalogDeleteResult) {
-  return result.cleanup === 'complete' ? 'Limpieza de imagenes completada.' : result.cleanup === 'retained_shared'
-    ? 'Imagen conservada: compartida o con referencias no verificables.' : result.cleanup === 'retained_unverified'
-      ? 'Imagen conservada: no se pudo verificar su propiedad.' : 'Limpieza de imagenes pendiente. Puedes reintentar sin repetir el borrado.'
+export function reportCatalogCleanup(result: CatalogDeleteResult) {
+  if (result.cleanup !== 'complete') {
+    console.warn('Catalog image cleanup requires review.', { status: result.cleanup })
+  }
 }

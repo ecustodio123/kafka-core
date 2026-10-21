@@ -1,6 +1,5 @@
 import { Toggle } from '../../components/Toggle'
-import { CatalogDeletionRecovery } from '../../components/CatalogDeletionRecovery'
-import { cleanupCatalogImages, cleanupMessage, deleteCatalogEntity } from '../../services/catalogDeletion'
+import { cleanupCatalogImages, reportCatalogCleanup, deleteCatalogEntity } from '../../services/catalogDeletion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import {
@@ -55,7 +54,6 @@ const emptyForm: FormState = {
 
 export function CategoriesPage({ store }: { store: Store }) {
   const busy = useRef(false)
-  const [deletionRevision, setDeletionRevision] = useState(0)
   const [categories, setCategories] = useState<Category[]>([])
   const [productCounts, setProductCounts] = useState<CategoryProductCounts>({})
   const [loading, setLoading] = useState(true)
@@ -208,7 +206,6 @@ export function CategoriesPage({ store }: { store: Store }) {
         : await createCategory(store.id, parsedInput.value)
       setEditingCategory(savedCategory)
       setCategories(current => sortCategories([...current.filter(row => row.id !== savedCategory.id), savedCategory]))
-      let cleanupWarning: string | null = null
 
       if (imageFile) {
         const previousImageUrl = editingCategory?.image_url ?? null
@@ -229,9 +226,9 @@ export function CategoriesPage({ store }: { store: Store }) {
         if (previousImageUrl && previousImageUrl !== uploadedImage.imageUrl) {
           try {
             const cleanup = await cleanupCatalogImages(store.id, 'category', savedCategory.id)
-            if (cleanup.cleanup !== 'complete') cleanupWarning = cleanupMessage(cleanup)
-          } catch (caughtError) {
-            cleanupWarning = getErrorMessage(caughtError)
+            reportCatalogCleanup(cleanup)
+          } catch {
+            console.warn('Catalog image cleanup could not be confirmed.')
           }
         }
       } else if (shouldRemoveImage && editingCategory?.image_url) {
@@ -239,9 +236,9 @@ export function CategoriesPage({ store }: { store: Store }) {
 
         try {
           const cleanup = await cleanupCatalogImages(store.id, 'category', savedCategory.id)
-          if (cleanup.cleanup !== 'complete') cleanupWarning = cleanupMessage(cleanup)
-        } catch (caughtError) {
-          cleanupWarning = getErrorMessage(caughtError)
+          reportCatalogCleanup(cleanup)
+        } catch {
+          console.warn('Catalog image cleanup could not be confirmed.')
         }
       }
 
@@ -252,14 +249,10 @@ export function CategoriesPage({ store }: { store: Store }) {
       })
 
       setNotice({
-        type: cleanupWarning ? 'error' : 'success',
+        type: 'success',
         message: editingCategory
-          ? cleanupWarning
-            ? `Categoria actualizada, pero ${cleanupWarning}`
-            : 'Categoria actualizada correctamente.'
-          : cleanupWarning
-            ? `Categoria creada, pero ${cleanupWarning}`
-            : 'Categoria creada correctamente.',
+          ? 'Categoria actualizada correctamente.'
+          : 'Categoria creada correctamente.',
       })
       closeForm()
     } catch (caughtError) {
@@ -320,14 +313,15 @@ export function CategoriesPage({ store }: { store: Store }) {
     if ((productCounts[category.id] ?? 0) > 0) {
       setNotice({ type: 'error', message: 'No puedes eliminar una categoria con productos asociados.' }); return
     }
-    if (!window.confirm(`Eliminar la categoria "${category.name}"? No se eliminaran productos. La imagen solo se borrara si es seguro.`)) return
+    if (!window.confirm(`¿Eliminar la categoría "${category.name}"? Esta acción no se puede deshacer.`)) return
     busy.current = true; setSaving(true); setActionCategoryId(category.id)
     try {
       const result = await deleteCatalogEntity(store.id, 'category', category.id)
       setCategories(current => current.filter(row => row.id !== category.id))
-      setNotice({ type: result.cleanup === 'pending' ? 'error' : 'success', message: `Categoria eliminada. ${cleanupMessage(result)}` })
+      reportCatalogCleanup(result)
+      setNotice({ type: 'success', message: 'Categoría eliminada correctamente.' })
     } catch (caught) { setNotice({ type: 'error', message: getErrorMessage(caught) }) }
-    finally { busy.current = false; setSaving(false); setActionCategoryId(null); setDeletionRevision(n => n + 1) }
+    finally { busy.current = false; setSaving(false); setActionCategoryId(null) }
   }
 
   return (
@@ -364,9 +358,6 @@ export function CategoriesPage({ store }: { store: Store }) {
       </div>
 
       {notice ? <NoticeBanner notice={notice} /> : null}
-      <CatalogDeletionRecovery storeId={store.id} kind="category" revision={deletionRevision} disabled={saving || isFormOpen || actionCategoryId !== null}
-        onBusyChange={value => { busy.current = value; setSaving(value) }}
-        onDeleted={id => setCategories(current => current.filter(row => row.id !== id))} />
 
       {isFormOpen ? (
         <CategoryForm

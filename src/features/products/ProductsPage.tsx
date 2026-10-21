@@ -1,6 +1,5 @@
 import { Toggle } from '../../components/Toggle'
-import { CatalogDeletionRecovery } from '../../components/CatalogDeletionRecovery'
-import { cleanupCatalogImages, cleanupMessage, deleteCatalogEntity } from '../../services/catalogDeletion'
+import { cleanupCatalogImages, reportCatalogCleanup, deleteCatalogEntity } from '../../services/catalogDeletion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, FormEvent, ReactNode, SetStateAction } from 'react'
 import {
@@ -71,7 +70,6 @@ export function ProductsPage({ store }: { store: Store }) {
   )
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
-  const [cleanupNotice, setCleanupNotice] = useState<string | null>(null)
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [editingProduct, setEditingProduct] = useState<Product | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm)
@@ -80,7 +78,6 @@ export function ProductsPage({ store }: { store: Store }) {
   const [invalidImageSelection, setInvalidImageSelection] = useState(false)
   const [imageOperation, setImageOperation] = useState<ProductImageOperation | null>(null)
   const saveInFlight = useRef(false)
-  const [deletionRevision, setDeletionRevision] = useState(0)
   const confirmedSave = useRef<{
     storeId: number; ownerId: Store['owner_user_id']; productId: number; input: ProductFormInput
   } | null>(null)
@@ -242,8 +239,8 @@ export function ProductsPage({ store }: { store: Store }) {
         setPreparedImage(null)
         setImageFile(null)
         if (imageOperation.expectedPath) {
-          try { const cleanup = await cleanupCatalogImages(store.id, 'product', String(editingProduct.id)); setCleanupNotice(cleanupMessage(cleanup)) }
-          catch { setCleanupNotice('Imagen vinculada. Limpieza anterior pendiente de backend; los archivos se conservaron.') }
+          try { reportCatalogCleanup(await cleanupCatalogImages(store.id, 'product', String(editingProduct.id))) }
+          catch { console.warn('Catalog image cleanup could not be confirmed.') }
         }
       }
       setNotice({ type: result.status === 'linked' ? 'success' : 'error', message: result.message })
@@ -313,8 +310,8 @@ export function ProductsPage({ store }: { store: Store }) {
         savedProduct = result.product
         if (editingProduct?.image_path) try {
           const cleanup = await cleanupCatalogImages(store.id, 'product', String(savedProduct.id))
-          setCleanupNotice(cleanupMessage(cleanup))
-        } catch { setCleanupNotice('Producto guardado. Limpieza anterior pendiente de backend; los archivos se conservaron.') }
+          reportCatalogCleanup(cleanup)
+        } catch { console.warn('Catalog image cleanup could not be confirmed.') }
       }
 
       replaceProduct(savedProduct)
@@ -364,7 +361,7 @@ export function ProductsPage({ store }: { store: Store }) {
 
   async function handleDelete(product: Product) {
     if (saveInFlight.current || isFormOpen || actionProductId !== null) return
-    if (!window.confirm(`Eliminar el producto "${product.name}"? La imagen solo se eliminara si el backend verifica que no esta compartida.`)) return
+    if (!window.confirm(`¿Eliminar el producto "${product.name}"? Esta acción no se puede deshacer.`)) return
     saveInFlight.current = true
     setSaving(true)
     setActionProductId(product.id)
@@ -372,11 +369,12 @@ export function ProductsPage({ store }: { store: Store }) {
       const pending = images.load(product.id)
       if (pending && pending.phase !== 'linked') throw new Error('Hay una imagen pendiente. Resuelve o descarta ese cambio antes de eliminar.')
       const result = await deleteCatalogEntity(store.id, 'product', String(product.id))
-      if (result.deleted !== true) throw new Error('Eliminacion no confirmada.')
+      if (result.deleted !== true) throw new Error('No se pudo confirmar la eliminación. Actualiza la lista antes de volver a intentarlo.')
       setProducts(current => current.filter(row => row.id !== product.id))
-      setNotice({ type: result.cleanup === 'pending' ? 'error' : 'success', message: `Producto eliminado. ${cleanupMessage(result)}` })
+      reportCatalogCleanup(result)
+      setNotice({ type: 'success', message: 'Producto eliminado correctamente.' })
     } catch (caught) { setNotice({ type: 'error', message: getErrorMessage(caught) }) }
-    finally { saveInFlight.current = false; setSaving(false); setActionProductId(null); setDeletionRevision(n => n + 1) }
+    finally { saveInFlight.current = false; setSaving(false); setActionProductId(null) }
   }
 
   async function runProductAction(
@@ -439,10 +437,6 @@ export function ProductsPage({ store }: { store: Store }) {
       </div>
 
       {notice ? <NoticeBanner notice={notice} /> : null}
-      {cleanupNotice && <p role="status" className="mb-4 border-l-4 border-amber-500 bg-amber-50 p-3 text-sm">{cleanupNotice}</p>}
-      <CatalogDeletionRecovery storeId={store.id} kind="product" revision={deletionRevision} disabled={saving || isFormOpen || actionProductId !== null}
-        onBusyChange={busy => { saveInFlight.current = busy; setSaving(busy) }}
-        onDeleted={id => setProducts(current => current.filter(row => String(row.id) !== id))} />
 
       {isFormOpen ? (
         <ProductForm
@@ -547,9 +541,19 @@ function ProductForm({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
   const imageInput = useRef<HTMLInputElement>(null)
+  const formElement = useRef<HTMLFormElement>(null)
+  const editingProductId = editingProduct?.id
+  useEffect(() => {
+    if (editingProductId == null) return
+    formElement.current?.scrollIntoView({
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: 'start',
+    })
+  }, [editingProductId])
   return (
     <form
-      className="mb-5 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
+      ref={formElement}
+      className="mb-5 scroll-mt-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
       onSubmit={onSubmit}
     >
       <fieldset className="min-w-0" disabled={saving}>
