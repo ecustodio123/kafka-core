@@ -76,9 +76,51 @@ export type Store = {
   created_at: string
 }
 
+export type StoreFeatures = {
+  store_id: number
+  commerce_enabled: boolean | null
+  services_enabled: boolean | null
+  staff_enabled: boolean | null
+}
+export type ModuleFlags = Omit<StoreFeatures, 'store_id'>
+
+export type ModuleKind = 'services' | 'staff'
+export type ModuleRecord = {
+  id: string
+  store_id: number
+  name?: string
+  title: string | null
+  description: string | null
+  image_url: string | null
+  sort_order: number | null
+  is_active: boolean | null
+}
+export type ServiceRecord = Omit<ModuleRecord, 'name' | 'title'> & { title: string }
+export type StaffRecord = ModuleRecord & { name: string }
+type ServiceInsert = Pick<ServiceRecord, 'store_id' | 'title' | 'description' | 'sort_order' | 'is_active'>
+type StaffInsert = Pick<StaffRecord, 'store_id' | 'name' | 'title' | 'description' | 'sort_order' | 'is_active'>
+
 export type Database = {
   public: {
     Tables: {
+      services: {
+        Row: ServiceRecord
+        Insert: ServiceInsert
+        Update: Partial<Omit<ServiceRecord, 'id' | 'store_id'>>
+        Relationships: []
+      }
+      staff: {
+        Row: StaffRecord
+        Insert: StaffInsert
+        Update: Partial<Omit<StaffRecord, 'id' | 'store_id'>>
+        Relationships: []
+      }
+      store_features: {
+        Row: StoreFeatures
+        Insert: StoreFeatures
+        Update: Partial<ModuleFlags>
+        Relationships: []
+      }
       products: {
         Row: Product
         Insert: ProductInsert

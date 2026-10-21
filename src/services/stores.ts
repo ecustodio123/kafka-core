@@ -3,16 +3,17 @@ import type { Store } from '../types/database'
 
 const STORE_COLUMNS = 'id, name, slug, owner_user_id, created_at'
 
-export async function getCurrentUserStore(userId: string): Promise<Store | null> {
-  const { data, error } = await getSupabaseClient()
+export async function getUserStores(userId: string, superAdmin: boolean): Promise<Store[]> {
+  let query = getSupabaseClient()
     .from('stores')
     .select(STORE_COLUMNS)
-    .eq('owner_user_id', userId)
-    .maybeSingle()
+    .order('name').order('id')
+  if (!superAdmin) query = query.eq('owner_user_id', userId)
+  const { data, error } = await query
 
   if (error) {
     throw new Error(error.message)
   }
 
-  return data
+  return data ?? []
 }

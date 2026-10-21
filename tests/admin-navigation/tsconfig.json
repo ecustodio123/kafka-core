@@ -1,0 +1,4 @@
+{
+  "extends": "../product-images/tsconfig.json",
+  "include": ["*.ts", "*.tsx"]
+}

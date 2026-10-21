@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import { AlertCircle, Loader2, LogIn } from 'lucide-react'
+import { Loader2, LogIn } from 'lucide-react'
 import { getSupabaseClient, hasSupabaseConfig } from '../../lib/supabase'
+import { AuthLayout, AuthNotice } from './AuthLayout'
 
 export function AuthPage() {
   const [email, setEmail] = useState('')
@@ -42,20 +43,8 @@ export function AuthPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4 py-10">
-      <section className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="mb-6">
-          <p className="text-sm font-semibold text-slate-500">Kafka Core</p>
-          <h1 className="mt-1 text-2xl font-semibold text-slate-950">
-            Kafka Admin
-          </h1>
-          <p className="mt-2 text-sm text-slate-600">
-            Ingresa con el usuario que Kafka haya creado previamente en
-            Supabase Auth.
-          </p>
-        </div>
-
-        {error ? <Notice message={error} /> : null}
+    <AuthLayout description="Ingresa con el usuario que Kafka haya creado previamente en Supabase Auth.">
+        {error ? <AuthNotice message={error} /> : null}
 
         <form className="space-y-4" onSubmit={handleSubmit}>
           <label className="block">
@@ -99,17 +88,7 @@ export function AuthPage() {
             Entrar
           </button>
         </form>
-      </section>
-    </main>
-  )
-}
-
-function Notice({ message }: { message: string }) {
-  return (
-    <div className="mb-5 flex items-start gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
-      <AlertCircle aria-hidden="true" size={18} />
-      <p>{message}</p>
-    </div>
+    </AuthLayout>
   )
 }
 
