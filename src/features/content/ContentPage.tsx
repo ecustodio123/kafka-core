@@ -203,7 +203,7 @@ export function ContentPage({ kind, store, enabled }: { kind: ModuleKind; store:
             <label className={`${button} cursor-pointer`}><ImagePlus size={16} />Seleccionar imagen
               <input aria-label="Imagen" className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" disabled={saving || preparing} onChange={event => { void selectImage(event.target.files?.[0] ?? null); event.target.value = '' }} />
             </label>
-            <p className="text-xs text-slate-600">Imagen opcional. JPG, PNG o WebP, hasta 2 MB.</p>
+            <p className="text-xs text-slate-600">Imagen opcional. JPG, PNG o WebP, hasta 60 MB. Se optimiza automaticamente.</p>
             {preparing && <p role="status" className="text-sm">Preparando imagen...</p>}
             {(imageUrl || prepared) && <button className={button} type="button" onClick={() => { clearImage(); setRemoveImage(true) }}><X size={16} />Quitar imagen</button>}
           </div>

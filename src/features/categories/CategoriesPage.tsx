@@ -29,7 +29,7 @@ import {
 } from '../../services/categories'
 import {
   uploadCategoryImage,
-  validateCategoryImageFile,
+  prepareCategoryImage,
 } from '../../services/categoryImages'
 import type { Category, Store } from '../../types/database'
 
@@ -58,6 +58,7 @@ export function CategoriesPage({ store }: { store: Store }) {
   const [productCounts, setProductCounts] = useState<CategoryProductCounts>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [preparingImage, setPreparingImage] = useState(false)
   const [actionCategoryId, setActionCategoryId] = useState<
     Category['id'] | null
   >(null)
@@ -150,21 +151,30 @@ export function CategoriesPage({ store }: { store: Store }) {
     setForm((current) => ({ ...current, slug: slugify(slug) }))
   }
 
-  function handleImageChange(file: File | null) {
+  async function handleImageChange(file: File | null) {
+    if (busy.current) return
     if (!file) {
       resetImageState()
       return
     }
 
+    busy.current = true
+    setSaving(true)
+    setPreparingImage(true)
     try {
-      validateCategoryImageFile(file)
+      const blob = await prepareCategoryImage(file)
+      const optimized = new File([blob], file.name, { type: 'image/webp' })
       revokeLocalPreview()
-      setImageFile(file)
-      setImagePreviewUrl(URL.createObjectURL(file))
+      setImageFile(optimized)
+      setImagePreviewUrl(URL.createObjectURL(optimized))
       setShouldRemoveImage(false)
       setNotice(null)
     } catch (caughtError) {
       setNotice({ type: 'error', message: getErrorMessage(caughtError) })
+    } finally {
+      busy.current = false
+      setSaving(false)
+      setPreparingImage(false)
     }
   }
 
@@ -362,6 +372,7 @@ export function CategoriesPage({ store }: { store: Store }) {
       {isFormOpen ? (
         <CategoryForm
           form={form}
+          preparingImage={preparingImage}
           isEditing={Boolean(editingCategory)}
           saving={saving}
           imageFile={imageFile}
@@ -433,6 +444,7 @@ export function CategoriesPage({ store }: { store: Store }) {
 
 function CategoryForm({
   form,
+  preparingImage,
   isEditing,
   saving,
   imageFile,
@@ -446,6 +458,7 @@ function CategoryForm({
   onSubmit,
 }: {
   form: FormState
+  preparingImage: boolean
   isEditing: boolean
   saving: boolean
   imageFile: File | null
@@ -498,6 +511,7 @@ function CategoryForm({
                 accept="image/png,image/jpeg,image/webp"
                 className="sr-only"
                 id="category-image"
+                disabled={saving}
                 onChange={(event) =>
                   onImageChange(event.target.files?.[0] ?? null)
                 }
@@ -506,12 +520,14 @@ function CategoryForm({
               <p className="mt-2 text-xs text-slate-500">
                 {imageFile
                   ? imageFile.name
-                  : 'JPG, PNG o WebP. Maximo 2 MB.'}
+                  : 'JPG, PNG o WebP. Maximo 60 MB. Se optimiza automaticamente.'}
               </p>
+              {preparingImage && <p role="status" className="mt-2 text-sm text-slate-600">Preparando imagen...</p>}
               {imagePreviewUrl ? (
                 <button
                   className="mt-2 text-xs font-medium text-slate-700 underline"
                   onClick={onImageRemove}
+                  disabled={saving}
                   type="button"
                 >
                   Quitar imagen

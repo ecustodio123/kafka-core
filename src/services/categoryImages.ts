@@ -1,5 +1,5 @@
 import { getSupabaseClient } from '../lib/supabase'
-import { convertImageToWebp, validateImageFile } from './imageProcessing'
+import { optimizeImage, validateImageFile } from './imageProcessing'
 import { slugifyPathSegment } from './pathSlugs'
 import type { Category, Store } from '../types/database'
 
@@ -7,7 +7,11 @@ const CATEGORY_IMAGES_BUCKET = 'category-images'
 const MAX_CATEGORY_IMAGE_SIZE_BYTES = 2 * 1024 * 1024
 
 export function validateCategoryImageFile(file: File) {
-  validateImageFile(file, MAX_CATEGORY_IMAGE_SIZE_BYTES)
+  validateImageFile(file)
+}
+
+export async function prepareCategoryImage(file: File) {
+  return optimizeImage(file, MAX_CATEGORY_IMAGE_SIZE_BYTES)
 }
 
 export async function uploadCategoryImage({
@@ -25,7 +29,7 @@ export async function uploadCategoryImage({
 }) {
   validateCategoryImageFile(file)
 
-  const imageBlob = await convertImageToWebp(file)
+  const imageBlob = await prepareCategoryImage(file)
   const imagePath = [
     `${storeId}-${slugifyPathSegment(storeSlug)}`,
     'categories',

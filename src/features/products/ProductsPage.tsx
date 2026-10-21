@@ -65,6 +65,7 @@ export function ProductsPage({ store }: { store: Store }) {
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [preparingImage, setPreparingImage] = useState(false)
   const [actionProductId, setActionProductId] = useState<Product['id'] | null>(
     null,
   )
@@ -206,6 +207,7 @@ export function ProductsPage({ store }: { store: Store }) {
     }
     saveInFlight.current = true
     setSaving(true)
+    setPreparingImage(true)
     try {
       const prepared = await prepareProductImage(file)
       if (imageOperation && imageOperation.phase !== 'linked') {
@@ -222,6 +224,7 @@ export function ProductsPage({ store }: { store: Store }) {
       setInvalidImageSelection(true)
       setNotice({ type: 'error', message: getErrorMessage(caughtError) })
     } finally {
+      setPreparingImage(false)
       saveInFlight.current = false
       setSaving(false)
     }
@@ -441,6 +444,7 @@ export function ProductsPage({ store }: { store: Store }) {
       {isFormOpen ? (
         <ProductForm
           form={form}
+          preparingImage={preparingImage}
           isEditing={Boolean(editingProduct)}
           saving={saving}
           setForm={setForm}
@@ -513,6 +517,7 @@ export function ProductsPage({ store }: { store: Store }) {
 
 function ProductForm({
   form,
+  preparingImage,
   isEditing,
   saving,
   setForm,
@@ -527,6 +532,7 @@ function ProductForm({
   onSubmit,
 }: {
   form: FormState
+  preparingImage: boolean
   isEditing: boolean
   saving: boolean
   setForm: Dispatch<SetStateAction<FormState>>
@@ -671,8 +677,9 @@ function ProductForm({
             <p className="mt-2 break-all text-xs text-slate-500">
               {imageFile
                 ? imageFile.name
-                : 'PNG, JPG o WebP. Maximo 5 MB; hasta 4096 px por lado y 12 megapixeles.'}
+                : 'PNG, JPG o WebP. Maximo 60 MB. Se optimiza automaticamente.'}
             </p>
+            {preparingImage && <p role="status" className="mt-2 text-sm text-slate-600">Preparando imagen...</p>}
             {imageFile ? (
               <button
                 className="mt-2 text-xs font-medium text-slate-700 underline"

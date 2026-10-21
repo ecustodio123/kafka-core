@@ -1,5 +1,4 @@
 import { getSupabaseClient } from '../lib/supabase'
-import { validateImageFile } from './imageProcessing'
 import { imageDigest, prepareProductImage } from './productImagePreparation'
 import type { PreparedProductImage } from './productImagePreparation'
 import { slugifyPathSegment } from './pathSlugs'
@@ -10,10 +9,7 @@ const maxBytes = 2 * 1024 * 1024
 export type ContentImage = { prepared: PreparedProductImage; path: string; url: string; phase: 'prepared' | 'uploading' | 'uploaded' | 'uncertain' }
 export function moduleBucket(kind: ModuleKind) { return kind === 'staff' ? 'staff-images' : 'service-images' }
 export async function prepareModuleImage(file: File) {
-  validateImageFile(file, maxBytes)
-  const prepared = await prepareProductImage(file)
-  if (prepared.size > maxBytes) throw new Error('El WebP preparado supera el maximo de 2 MB.')
-  return prepared
+  return prepareProductImage(file, undefined, maxBytes)
 }
 export function beginModuleImage(kind: ModuleKind, store: Store, record: ModuleRecord, prepared: PreparedProductImage): ContentImage {
   if (record.store_id !== store.id) throw new Error('La imagen no corresponde a esta tienda.')

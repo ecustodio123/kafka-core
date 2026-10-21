@@ -104,16 +104,25 @@ async function setup(page: Page, kind: ModuleKind = 'services', role = 'admin') 
   await expect(page.getByRole('button', { name: kind === 'staff' ? 'Nuevo profesional' : 'Nuevo servicio', exact: true })).toBeEnabled()
   return { rows, flags, files, calls, behavior }
 }
-async function png(page: Page) {
-  return Buffer.from(await page.evaluate(async () => {
-    const c = document.createElement('canvas'); c.width = 64; c.height = 64
-    c.getContext('2d')!.fillRect(0, 0, 64, 64)
+async function png(page: Page, width = 64, height = 64) {
+  return Buffer.from(await page.evaluate(async ({ width, height }) => {
+    const c = document.createElement('canvas'); c.width = width; c.height = height
+    c.getContext('2d')!.fillRect(0, 0, width, height)
     const blob = await new Promise<Blob>(resolve => c.toBlob(blob => resolve(blob!), 'image/png'))
     return [...new Uint8Array(await blob.arrayBuffer())]
-  }))
+  }, { width, height }))
 }
-async function select(page: Page) {
-  await page.getByLabel('Imagen', { exact: true }).setInputFiles({ name: 'local.png', mimeType: 'image/png', buffer: await png(page) })
+async function select(page: Page, width = 64, height = 64, originalMB?: number) {
+  const buffer = await png(page, width, height)
+  const input = page.getByLabel('Imagen', { exact: true })
+  if (originalMB) {
+    await input.evaluate((element, { bytes, originalMB }) => {
+      const file = new File([new Uint8Array(bytes), new Uint8Array(originalMB * 1024 * 1024 - bytes.length)], 'large.png', { type: 'image/png' })
+      const data = new DataTransfer(); data.items.add(file)
+      ;(element as HTMLInputElement).files = data.files
+      element.dispatchEvent(new Event('change', { bubbles: true }))
+    }, { bytes: [...buffer], originalMB })
+  } else await input.setInputFiles({ name: 'local.png', mimeType: 'image/png', buffer })
   await expect(page.getByText('Preparando imagen...')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
 }
@@ -150,10 +159,15 @@ for (const kind of ['services', 'staff'] as const) {
   test(`${kind}: images upload, replacement and removal retain all Storage objects`, async ({ page }) => {
     const f = await setup(page, kind)
     await page.getByRole('button', { name: `Editar Alpha ${person ? 'Person' : 'Service'}`, exact: true }).click()
-    await select(page)
+    await select(page, 2400, 1600, kind === 'staff' ? 60 : 30)
     await page.getByRole('button', { name: 'Guardar', exact: true }).click()
     await expect(page.getByRole('status')).toContainText('guardado correctamente')
     expect(f.calls.upload).toBe(1); expect(f.calls.update).toBe(0)
+    const dimensions = await page.evaluate(async bytes => {
+      const image = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/webp' }))
+      const result = [image.width, image.height]; image.close(); return result
+    }, [...f.files.values().next().value!])
+    expect(dimensions).toEqual([1200, 800])
     expect(f.calls.paths[0]).toMatch(new RegExp(`^${person ? 'staff' : 'service'}-images/1-alpha/${kind}/[a-f0-9-]+-alpha-.*principal-[a-f0-9-]+\\.webp$`))
     await page.getByRole('button', { name: `Editar Alpha ${person ? 'Person' : 'Service'}`, exact: true }).click()
     await select(page)

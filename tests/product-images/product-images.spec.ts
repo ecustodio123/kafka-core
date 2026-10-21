@@ -114,13 +114,133 @@ for (const mobile of [false, true]) {
   })
 }
 
-test('real canvas conversion bounds product output and preserves category default dimensions', async ({ page }) => {
+for (const [width, height] of [[6000, 4000], [8000, 6000]]) {
+  test(`${width}x${height} originals use resized bitmaps without the full-resolution Image fallback`, async ({ page }) => {
+    await harness(page)
+    const result = await page.evaluate(async ({ width, height }) => {
+      const api = (window as unknown as { imageTests: {
+        prepareProductImage: (file: File) => Promise<{ blob: Blob }>
+        prepareCategoryImage: (file: File) => Promise<Blob>
+        prepareModuleImage: (file: File) => Promise<{ blob: Blob }>
+      } }).imageTests
+      const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height
+      const blob = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/png'))
+      canvas.width = 0; canvas.height = 0
+      const file = new File([blob], 'high-resolution.png', { type: 'image/png' })
+      const original = window.Image
+      window.Image = class { constructor() { throw new Error('Full-resolution fallback forbidden') } } as unknown as typeof Image
+      try {
+        const outputs = [(await api.prepareProductImage(file)).blob, await api.prepareCategoryImage(file), (await api.prepareModuleImage(file)).blob]
+        return Promise.all(outputs.map(async output => {
+          const image = await createImageBitmap(output)
+          const result = [image.width, image.height]; image.close(); return result
+        }))
+      } finally { window.Image = original }
+    }, { width, height })
+    expect(result).toEqual(Array(3).fill([1200, Math.round(height * 1200 / width)]))
+  })
+}
+
+for (const failure of ['missing-api', 'ignored-resize', 'decode-error']) {
+  test(`high-resolution ${failure} fails safely without a full-size fallback or upload`, async ({ page }) => {
+    const f = await harness(page)
+    if (failure === 'ignored-resize') {
+      await page.route('**/imageResize.worker.ts*', async route => {
+        const response = await route.fetch()
+        await route.fulfill({ response, body: `const nativeBitmap = self.createImageBitmap; self.createImageBitmap = (blob) => nativeBitmap(blob);\n${await response.text()}` })
+      })
+    }
+    const result = await page.evaluate(async failure => {
+      const api = (window as unknown as { imageTests: { prepareProductImage: (file: File) => Promise<unknown> } }).imageTests
+      const canvas = document.createElement('canvas'); canvas.width = 6000; canvas.height = 4000
+      const blob = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/png'))
+      canvas.width = 0; canvas.height = 0
+      const file = new File([failure === 'decode-error' ? blob.slice(0, 33) : blob], 'large.png', { type: 'image/png' })
+      if (failure === 'missing-api') Object.defineProperty(window, 'createImageBitmap', { configurable: true, value: undefined })
+      let fullSizeLoads = 0
+      window.Image = class { constructor() { fullSizeLoads++; throw new Error('Unsafe full-size decode') } } as unknown as typeof Image
+      try { await api.prepareProductImage(file); return { error: '', fullSizeLoads } }
+      catch (error) { return { error: (error as Error).message, fullSizeLoads } }
+    }, failure)
+    expect(result.error).toMatch(/forma segura|menor resolucion/)
+    expect(result.fullSizeLoads).toBe(0)
+    expect(f.calls.upload + f.calls.link + f.calls.create + f.calls.metadata).toBe(0)
+  })
+}
+
+test('browser without createImageBitmap can still optimize safely bounded small images', async ({ page }) => {
+  await harness(page)
+  const result = await page.evaluate(async () => {
+    const api = (window as unknown as { imageTests: { prepareProductImage: (file: File) => Promise<{ blob: Blob }> } }).imageTests
+    const canvas = document.createElement('canvas'); canvas.width = 64; canvas.height = 32
+    const blob = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/png'))
+    Object.defineProperty(window, 'createImageBitmap', { configurable: true, value: undefined })
+    return (await api.prepareProductImage(new File([blob], 'small.png', { type: 'image/png' }))).blob.type
+  })
+  expect(result).toBe('image/webp')
+})
+
+for (const originalMB of [10, 30, 60]) {
+  test(`${originalMB} MB original is decoded and optimized by product, category and service/staff entry points`, async ({ page }) => {
+    await harness(page)
+    const result = await page.evaluate(async originalMB => {
+      const api = (window as unknown as { imageTests: {
+        prepareProductImage: (file: File) => Promise<{ blob: Blob }>
+        prepareModuleImage: (file: File) => Promise<{ blob: Blob }>
+        prepareCategoryImage: (file: File) => Promise<Blob>
+      } }).imageTests
+      const canvas = document.createElement('canvas'); canvas.width = 2400; canvas.height = 1600
+      const png = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/png'))
+      // Padding after PNG IEND increases compressed file size without allocating
+      // a huge bitmap; real browser decoding and the real Worker still run.
+      const file = new File([png, new Uint8Array(originalMB * 1024 * 1024 - png.size)], 'large.png', { type: 'image/png' })
+      const outputs = [(await api.prepareProductImage(file)).blob, await api.prepareCategoryImage(file), (await api.prepareModuleImage(file)).blob]
+      return Promise.all(outputs.map(async blob => {
+        const image = await createImageBitmap(blob)
+        const value = { inputSize: file.size, size: blob.size, type: blob.type, width: image.width, height: image.height }
+        image.close(); return value
+      }))
+    }, originalMB)
+    for (const output of result) {
+      expect(output.inputSize).toBe(originalMB * 1024 * 1024)
+      expect(output.size).toBeLessThanOrEqual(2 * 1024 * 1024)
+      expect(output.type).toBe('image/webp'); expect([output.width, output.height]).toEqual([1200, 800])
+    }
+  })
+}
+
+for (const kind of ['product', 'category'] as const) {
+  test(`${kind} shows processing and disables saving while a 60 MB original is optimized`, async ({ page }) => {
+    const f = await harness(page)
+    if (kind === 'category') await page.goto('/tests/product-images/catalog-browser.html?kind=category')
+    await page.getByRole('button', { name: kind === 'product' ? 'Nuevo producto' : 'Nueva categoria', exact: true }).click()
+    await page.route('**/productImageHeader.worker.ts*', async route => {
+      await new Promise(resolve => setTimeout(resolve, 500)); await route.continue()
+    })
+    await page.locator(kind === 'product' ? '#product-image' : '#category-image').evaluate(async element => {
+      const canvas = document.createElement('canvas'); canvas.width = 64; canvas.height = 64
+      const png = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/png'))
+      const file = new File([png, new Uint8Array(60 * 1024 * 1024 - png.size)], 'large.png', { type: 'image/png' })
+      const data = new DataTransfer(); data.items.add(file)
+      ;(element as HTMLInputElement).files = data.files
+      element.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await expect(page.getByText('Preparando imagen...', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Guardando|Guardar/, exact: false })).toBeDisabled()
+    await expect(page.getByText('Preparando imagen...', { exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+    expect(f.calls.upload + f.calls.link + f.calls.create + f.calls.metadata).toBe(0)
+  })
+}
+
+test('all image preparation flows resize large JPG/PNG/WebP proportionally to 1200 px', async ({ page }) => {
   await harness(page)
   const bytes = Array.from(await png(page, 2800, 1800))
   const result = await page.evaluate(async (bytes) => {
     const api = (window as unknown as { imageTests: {
       prepareProductImage: (file: File) => Promise<{ blob: Blob }>
-      convertImageToWebp: (file: File) => Promise<Blob>
+      optimizeImage: (file: File, maxBytes: number) => Promise<Blob>
+      prepareModuleImage: (file: File) => Promise<{ blob: Blob }>
     } }).imageTests
     const source = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }))
     const canvas = document.createElement('canvas'); canvas.width = source.width; canvas.height = source.height
@@ -131,19 +251,87 @@ test('real canvas conversion bounds product output and preserves category defaul
       const file = new File([blob], 'local-image', { type: mime })
       const prepared = await api.prepareProductImage(file)
       const product = await createImageBitmap(prepared.blob)
-      const category = await createImageBitmap(await api.convertImageToWebp(file))
+      const category = await createImageBitmap(await api.optimizeImage(file, 2 * 1024 * 1024))
+      const module = await createImageBitmap((await api.prepareModuleImage(file)).blob)
       results.push({ type: prepared.blob.type, width: product.width, height: product.height,
-        categoryWidth: category.width, categoryHeight: category.height })
-      product.close(); category.close()
+        categoryWidth: category.width, categoryHeight: category.height, moduleWidth: module.width, moduleHeight: module.height })
+      product.close(); category.close(); module.close()
     }
     canvas.width = 0; canvas.height = 0
     return results
   }, bytes)
   expect(result).toHaveLength(3)
   for (const image of result) {
-    expect(image.type).toBe('image/webp'); expect(image.width).toBe(2048)
-    expect(image.categoryWidth).toBe(2800); expect(image.categoryHeight).toBe(1800)
+    expect(image.type).toBe('image/webp'); expect(image.width).toBe(1200); expect(image.height).toBe(771)
+    expect(image.categoryWidth).toBe(1200); expect(image.categoryHeight).toBe(771)
+    expect(image.moduleWidth).toBe(1200); expect(image.moduleHeight).toBe(771)
   }
+})
+
+test('category upload uses the shared optimizer before Storage and rejects invalid input without uploading', async ({ page }) => {
+  const f = await harness(page)
+  const bytes = [...await png(page, 2400, 1600)]
+  await page.evaluate(async bytes => {
+    const { uploadCategoryImage } = (window as unknown as { imageTests: { uploadCategoryImage: (input: {
+      file: File; storeId: number; storeSlug: string; categoryId: string; categorySlug: string
+    }) => Promise<unknown> } }).imageTests
+    const input = { storeId: 1, storeSlug: 'local', categoryId: 'aaaaaaaa-1111-4111-8111-111111111111', categorySlug: 'local' }
+    let rejected = false
+    try { await uploadCategoryImage({ ...input, file: new File(['not PNG'], 'invalid.png', { type: 'image/png' }) }) }
+    catch { rejected = true }
+    if (!rejected) throw new Error('Invalid category image accepted')
+    await uploadCategoryImage({ ...input, file: new File([new Uint8Array(bytes)], 'large.png', { type: 'image/png' }) })
+  }, bytes)
+  expect(f.calls.upload).toBe(1)
+  const path = f.calls.uploadPaths[0]
+  expect(path).toMatch(/^category-images\/1-local\/categories\/aaaaaaaa-1111-4111-8111-111111111111-local\/principal-\d+\.webp$/)
+  const dimensions = await page.evaluate(async bytes => {
+    const image = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/webp' }))
+    const result = [image.width, image.height]; image.close(); return result
+  }, [...f.files.get(path)!])
+  expect(dimensions).toEqual([1200, 800])
+})
+
+test('small transparent PNG stays small, retains alpha and encodes WebP at quality 0.80', async ({ page }) => {
+  await harness(page)
+  const result = await page.evaluate(async () => {
+    const { optimizeImage } = (window as unknown as { imageTests: { optimizeImage: (file: File) => Promise<Blob> } }).imageTests
+    const source = document.createElement('canvas'); source.width = 64; source.height = 32
+    source.getContext('2d')!.fillRect(0, 0, 16, 16)
+    const input = await new Promise<Blob>(resolve => source.toBlob(blob => resolve(blob!), 'image/png'))
+    const original = HTMLCanvasElement.prototype.toBlob
+    const qualities: (number | undefined)[] = []
+    HTMLCanvasElement.prototype.toBlob = function(callback, type, quality) {
+      qualities.push(quality); return original.call(this, callback, type, quality)
+    }
+    try {
+      const output = await optimizeImage(new File([input], 'transparent.png', { type: 'image/png' }))
+      const image = await createImageBitmap(output)
+      const decoded = document.createElement('canvas'); decoded.width = image.width; decoded.height = image.height
+      const context = decoded.getContext('2d')!; context.drawImage(image, 0, 0); image.close()
+      return { type: output.type, width: decoded.width, height: decoded.height, qualities,
+        transparent: context.getImageData(40, 20, 1, 1).data[3], opaque: context.getImageData(5, 5, 1, 1).data[3] }
+    } finally { HTMLCanvasElement.prototype.toBlob = original }
+  })
+  expect(result).toEqual({ type: 'image/webp', width: 64, height: 32, qualities: [0.8], transparent: 0, opaque: 255 })
+})
+
+test('already-sized WebP is decoded and validated without recompression or byte growth', async ({ page }) => {
+  await harness(page)
+  const result = await page.evaluate(async () => {
+    const { optimizeImage } = (window as unknown as { imageTests: { optimizeImage: (file: File) => Promise<Blob> } }).imageTests
+    const canvas = document.createElement('canvas'); canvas.width = 64; canvas.height = 32
+    const input = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/webp', 0.8))
+    const file = new File([input], 'optimized.webp', { type: 'image/webp' })
+    const original = HTMLCanvasElement.prototype.toBlob
+    HTMLCanvasElement.prototype.toBlob = () => { throw new Error('Unnecessary recompression') }
+    try {
+      const output = await optimizeImage(file)
+      return { same: output === file, size: output.size, originalSize: file.size,
+        bytesEqual: String(new Uint8Array(await output.arrayBuffer())) === String(new Uint8Array(await file.arrayBuffer())) }
+    } finally { HTMLCanvasElement.prototype.toBlob = original }
+  })
+  expect(result.same).toBe(true); expect(result.bytesEqual).toBe(true); expect(result.size).toBe(result.originalSize)
 })
 
 for (const kind of ['invalid', 'conversion-failure', 'dimension-limit', 'mime-mismatch', 'hostile-header']) {
@@ -154,7 +342,7 @@ for (const kind of ['invalid', 'conversion-failure', 'dimension-limit', 'mime-mi
     await page.getByLabel('Precio', { exact: true }).fill('10')
     const buffer = kind === 'invalid' ? Buffer.from('not PNG')
       : kind === 'hostile-header' ? Buffer.alloc(512 * 1024) : await png(page)
-    if (kind === 'dimension-limit') buffer.writeUInt32BE(10000, 16)
+    if (kind === 'dimension-limit') buffer.writeUInt32BE(20000, 16)
     if (kind === 'hostile-header') { buffer[0] = 255; buffer[1] = 216 }
     await page.locator('#product-image').setInputFiles({ name: 'bad.png',
       mimeType: kind === 'mime-mismatch' || kind === 'hostile-header' ? 'image/jpeg' : 'image/png',

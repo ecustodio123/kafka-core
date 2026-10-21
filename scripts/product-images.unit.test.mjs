@@ -2,12 +2,52 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createProductImageCoordinator } from '../src/services/productImageOperation.ts';
 import { prepareProductImage, imageDigest } from '../src/services/productImagePreparation.ts';
+import { optimizeImage } from '../src/services/imageProcessing.ts';
+import { inspectProductImageHeader } from '../src/services/productImageHeader.ts';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhX8AAAAASUVORK5CYII=', 'base64');
 const webp = new Blob([Buffer.from('UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA', 'base64')], { type: 'image/webp' });
 const prepared = { selectionId: '11111111-1111-4111-8111-111111111111', blob: webp,
   sha256: await imageDigest(await webp.arrayBuffer()), size: webp.size };
 const product = { id: 7, store_id: 1, name: 'LOCAL PRODUCT', image_path: '1/7/image.webp' };
+
+test('shared optimizer accepts 10, 30 and 60 MB originals and applies 2/5 MB only to output', async () => {
+  let converts = 0;
+  const convert = async () => { converts++; return webp; };
+  for (const size of [10, 30, 60]) {
+    const file = new File([png, new Uint8Array(size * 1024 * 1024 - png.length)], 'large.png', { type: 'image/png' });
+    for (const limit of [2, 5]) assert.equal(await optimizeImage(file, limit * 1024 * 1024, convert), webp);
+  }
+  assert.equal(converts, 6);
+  let reads = 0;
+  await assert.rejects(optimizeImage({ type: 'image/png', size: 60 * 1024 * 1024 + 1,
+    arrayBuffer: async () => { reads++; throw new Error('must not read'); } }, 5 * 1024 * 1024, convert), /60 MB/);
+  assert.equal(reads, 0); assert.equal(converts, 6);
+});
+
+test('oversized output triggers bounded quality/dimension reductions, then succeeds or fails clearly', async () => {
+  const file = new File([png], 'valid.png', { type: 'image/png' });
+  const large = new Blob([new Uint8Array(2 * 1024 * 1024 + 1)], { type: 'image/webp' });
+  const attempts = [];
+  assert.equal(await optimizeImage(file, 2 * 1024 * 1024, async (_, limits) => {
+    attempts.push([limits.quality, limits.outputDimension, limits.forceReencode]);
+    return attempts.length < 3 ? large : webp;
+  }), webp);
+  assert.deepEqual(attempts, [[0.8,1200,false],[0.7,1000,true],[0.6,800,true]]);
+  for (const limit of [2, 5]) {
+    let calls = 0;
+    const oversized = new Blob([new Uint8Array(limit * 1024 * 1024 + 1)], { type: 'image/webp' });
+    await assert.rejects(optimizeImage(file, limit * 1024 * 1024, async () => { calls++; return oversized; }), new RegExp(`reducir la imagen a ${limit} MB`));
+    assert.equal(calls, 3);
+  }
+});
+
+test('a large WebP must be reencoded even if its pixel dimensions already fit', async () => {
+  const file = new File([webp, new Uint8Array(10 * 1024 * 1024)], 'heavy.webp', { type: 'image/webp' });
+  let forced;
+  assert.equal(await optimizeImage(file, 2 * 1024 * 1024, async (_, limits) => { forced = limits.forceReencode; return webp; }), webp);
+  assert.equal(forced, true);
+});
 function storage() {
   const map = new Map();
   return { map, getItem: (k) => map.get(k) ?? null, setItem: (k, v) => map.set(k, v), removeItem: (k) => map.delete(k) };
@@ -31,15 +71,24 @@ function fixture() {
   return { pending, files, db, calls, states, io, coordinator };
 }
 
+test('headers accept high resolution while rejecting extreme dimensions and pixel counts before decoding', async () => {
+  for (const [width, height] of [[6000,4000],[8000,6000]]) {
+    const bytes = Buffer.from(png); bytes.writeUInt32BE(width, 16); bytes.writeUInt32BE(height, 20);
+    assert.deepEqual(await inspectProductImageHeader(bytes, 'image/png', 16384), { width, height });
+  }
+});
+
 test('preparation rejects MIME spoofing, empty/oversized files and header dimensions BEFORE conversion', async () => {
   let converts = 0;
   const convert = async () => { converts++; return webp; };
-  const huge = Buffer.from(png); huge.writeUInt32BE(10000, 16);
+  const huge = Buffer.from(png); huge.writeUInt32BE(20000, 16);
+  const pixels = Buffer.from(png); pixels.writeUInt32BE(9000, 16); pixels.writeUInt32BE(9000, 20);
   for (const file of [new File([], 'empty.png', { type: 'image/png' }),
     new File(['not a png'], 'fake.png', { type: 'image/png' }),
     new File([png], 'wrong.jpg', { type: 'image/jpeg' }),
     new File([huge], 'huge.png', { type: 'image/png' }),
-    new File([new Uint8Array(5 * 1024 * 1024 + 1)], 'large.png', { type: 'image/png' })]) {
+    new File([pixels], 'pixels.png', { type: 'image/png' }),
+    { type: 'image/png', size: 60 * 1024 * 1024 + 1 }]) {
     await assert.rejects(prepareProductImage(file, convert));
   }
   assert.equal(converts, 0);
