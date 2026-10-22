@@ -129,9 +129,10 @@ async function select(page: Page, width = 64, height = 64, originalMB?: number) 
 
 for (const kind of ['services', 'staff'] as const) {
   const person = kind === 'staff'
-  test(`${kind}: CRUD, mandatory heading, explicit draft and publication with tenant scoped requests`, async ({ page }) => {
+  test(`${kind}: CRUD defaults to active and preserves explicit inactive edits with tenant scoped requests`, async ({ page }) => {
     const f = await setup(page, kind)
     await page.getByRole('button', { name: person ? 'Nuevo profesional' : 'Nuevo servicio', exact: true }).click()
+    await expect(page.getByLabel('Activo - Publicar', { exact: true })).toBeChecked()
     await page.getByRole('button', { name: 'Guardar', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('obligatorio')
     expect(f.calls.create).toBe(0)
@@ -140,9 +141,15 @@ for (const kind of ['services', 'staff'] as const) {
     await page.getByRole('button', { name: 'Guardar', exact: true }).dblclick()
     await expect(page.getByRole('heading', { name: 'New Local', exact: true })).toBeVisible()
     expect(f.calls.create).toBe(1)
-    expect(f.rows[kind].find(row => (row.name ?? row.title) === 'New Local')?.is_active).toBe(false)
+    expect(f.rows[kind].find(row => (row.name ?? row.title) === 'New Local')?.is_active).toBe(true)
     await page.getByRole('button', { name: 'Editar New Local', exact: true }).click()
     await page.getByLabel(person ? 'Nombre' : 'Titulo', { exact: true }).fill('Changed Local')
+    await page.getByLabel('Activo - Publicar', { exact: true }).uncheck()
+    await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Changed Local' })).toBeVisible()
+    expect(f.rows[kind].find(row => (row.name ?? row.title) === 'Changed Local')?.is_active).toBe(false)
+    await page.getByRole('button', { name: 'Editar Changed Local', exact: true }).click()
+    await expect(page.getByLabel('Inactivo - Borrador', { exact: true })).not.toBeChecked()
     await page.getByLabel('Inactivo - Borrador').check()
     await page.getByRole('button', { name: 'Guardar', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Changed Local' })).toBeVisible()

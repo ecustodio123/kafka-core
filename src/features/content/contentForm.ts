@@ -2,7 +2,7 @@ import type { ModuleKind, ModuleRecord } from '../../types/database.ts'
 
 export type ContentForm = { heading: string; title: string; description: string; sort_order: string; is_active: boolean }
 export type ContentInput = { heading: string; title: string | null; description: string | null; sort_order: number; is_active: boolean }
-export const emptyContentForm: ContentForm = { heading: '', title: '', description: '', sort_order: '0', is_active: false }
+export const emptyContentForm: ContentForm = { heading: '', title: '', description: '', sort_order: '0', is_active: true }
 
 export function contentHeading(kind: ModuleKind, record: ModuleRecord) {
   return kind === 'staff' ? record.name ?? '' : record.title ?? ''

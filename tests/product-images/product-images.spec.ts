@@ -96,6 +96,20 @@ async function harness(page: Page, initial: Partial<Product> = {}, catalogSize =
   return { db, files, pendingUploads, calls, behavior }
 }
 
+test('new products default to available, reset when reopened and preserve unavailable products on edit', async ({ page }) => {
+  const f = await harness(page, { available: false })
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+  await expect(page.getByLabel('Agotado', { exact: true })).not.toBeChecked()
+  await page.getByRole('button', { name: 'Cerrar formulario', exact: true }).click()
+  await page.getByRole('button', { name: 'Nuevo producto', exact: true }).click()
+  await expect(page.getByLabel('Disponible', { exact: true })).toBeChecked()
+  await page.getByLabel('Disponible', { exact: true }).uncheck()
+  await page.getByRole('button', { name: 'Cerrar formulario', exact: true }).click()
+  await page.getByRole('button', { name: 'Nuevo producto', exact: true }).click()
+  await expect(page.getByLabel('Disponible', { exact: true })).toBeChecked()
+  expect(f.calls.create + f.calls.metadata + f.calls.upload + f.calls.link).toBe(0)
+})
+
 for (const mobile of [false, true]) {
   test(`edit from the bottom automatically scrolls to the product form (${mobile ? 'mobile, reduced motion' : 'desktop'})`, async ({ page }) => {
     await page.setViewportSize(mobile ? { width: 375, height: 812 } : { width: 1280, height: 800 })
