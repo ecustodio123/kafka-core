@@ -5,6 +5,7 @@ import { AuthPage } from './features/auth/AuthPage'
 import { AcceptInvitePage } from './features/auth/AcceptInvitePage'
 import { CategoriesPage } from './features/categories/CategoriesPage'
 import { ProductsPage } from './features/products/ProductsPage'
+import { clearProductDrafts } from './features/products/productDraft'
 import { ContentPage } from './features/content/ContentPage'
 import { allowedSections, resolveGlobalRole } from './features/stores/storeAccess'
 import type { AdminSection, GlobalRole } from './features/stores/storeAccess'
@@ -29,6 +30,9 @@ export default function App() {
     let eventReceived = false
     const client = getSupabaseClient()
     const { data: { subscription } } = client.auth.onAuthStateChange((_event, next) => {
+      if (_event === 'SIGNED_OUT') {
+        try { clearProductDrafts(sessionStorage) } catch { /* Never block logout on browser storage. */ }
+      }
       eventReceived = true
       if (current) { setSession(next); setLoading(false) }
     })
@@ -125,7 +129,7 @@ function StoreWorkspace({ store, userId, role }: { store: Store; userId: string;
     </aside>
     <main className="min-w-0 space-y-4 px-4 py-6 sm:px-6">
       {legacy && <p role="status" className="border-l-4 border-amber-500 bg-amber-50 p-3 text-sm text-amber-950">Esta tienda aun no tiene configuracion de modulos. Commerce figura deshabilitado; conservas el acceso de compatibilidad a tu catalogo existente.</p>}
-      {active === 'products' && <ProductsPage store={store} />}
+      {active === 'products' && <ProductsPage store={store} userId={userId} />}
       {active === 'categories' && <CategoriesPage store={store} />}
       {active === 'modules' && <ModuleSettings row={features.row} superAdmin={role === 'super_admin'} saving={features.saving} save={features.save} reload={features.reload} />}
       {(active === 'services' || active === 'staff') && <ContentPage key={active} kind={active} store={store} enabled={features.row?.[active === 'services' ? 'services_enabled' : 'staff_enabled'] === true} />}

@@ -96,6 +96,87 @@ async function harness(page: Page, initial: Partial<Product> = {}, catalogSize =
   return { db, files, pendingUploads, calls, behavior }
 }
 
+test('create draft survives reload, asks to reselect image and clears after successful save', async ({ page }) => {
+  const f = await harness(page)
+  await page.getByRole('button', { name: 'Nuevo producto', exact: true }).click()
+  await page.getByLabel('Nombre', { exact: true }).fill('MOBILE DRAFT')
+  await page.getByLabel('Descripcion', { exact: true }).fill('Texto antes de abrir la galeria')
+  await page.getByLabel('Precio', { exact: true }).fill('25.50')
+  await page.locator('#product-image').setInputFiles({ name: 'mobile.png', mimeType: 'image/png', buffer: await png(page) })
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await page.reload()
+  await page.getByRole('button', { name: 'Recuperar borrador', exact: true }).click()
+  await expect(page.getByLabel('Nombre', { exact: true })).toHaveValue('MOBILE DRAFT')
+  await expect(page.getByRole('textbox', { name: 'Descripcion', exact: true })).toHaveValue('Texto antes de abrir la galeria')
+  await expect(page.getByLabel('Precio', { exact: true })).toHaveValue('25.50')
+  await expect(page.getByText(/Selecciona nuevamente la imagen pendiente/)).toBeVisible()
+  expect(f.calls.create + f.calls.metadata + f.calls.upload).toBe(0)
+  await page.getByRole('button', { name: 'Quitar seleccion', exact: true }).click()
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto creado correctamente.')).toBeVisible()
+  expect(await page.evaluate(() => Object.keys(sessionStorage).filter(k => k.startsWith('kafka.product-draft.')))).toEqual([])
+  expect(f.calls.create).toBe(1)
+})
+
+test('empty file selection preserves the valid image and allows selecting the same file again', async ({ page }) => {
+  const f = await harness(page)
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+  const file = { name: 'retained-mobile.png', mimeType: 'image/png', buffer: await png(page) }
+  await page.locator('#product-image').setInputFiles(file)
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await page.locator('#product-image').setInputFiles([])
+  await expect(page.getByText(file.name, { exact: true })).toBeVisible()
+  await page.locator('#product-image').setInputFiles(file)
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+  expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1); expect(f.calls.metadata).toBe(0)
+})
+
+test('edit draft never overrides a product changed since the draft baseline', async ({ page }) => {
+  const f = await harness(page)
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+  await page.getByLabel('Nombre', { exact: true }).fill('LOCAL UNSAVED EDIT')
+  f.db.product.name = 'NEW SERVER VALUE'
+  await page.reload()
+  await page.getByRole('button', { name: 'Recuperar borrador', exact: true }).click()
+  await expect(page.getByText(/El producto cambio desde el borrador/)).toBeVisible()
+  await expect(page.getByLabel('Nombre', { exact: true })).toHaveCount(0)
+  expect(f.calls.metadata + f.calls.upload + f.calls.create).toBe(0)
+  await page.getByRole('button', { name: 'Descartar borrador', exact: true }).click()
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+  await expect(page.getByLabel('Nombre', { exact: true })).toHaveValue('NEW SERVER VALUE')
+})
+
+test('edit draft restores after remount without leaking into another product', async ({ page }) => {
+  const f = await harness(page, {}, 2)
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).first().click()
+  await page.getByLabel('Nombre', { exact: true }).fill('RECOVERABLE EDIT')
+  await page.getByLabel('Precio', { exact: true }).fill('29')
+  await page.reload()
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).nth(1).click()
+  await expect(page.getByLabel('Nombre', { exact: true })).toHaveValue('LOCAL PRODUCT 2')
+  await page.getByRole('button', { name: 'Cerrar formulario', exact: true }).click()
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).first().click()
+  await expect(page.getByLabel('Nombre', { exact: true })).toHaveValue('RECOVERABLE EDIT')
+  await expect(page.getByLabel('Precio', { exact: true })).toHaveValue('29')
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+  expect(f.calls.metadata).toBe(1)
+  expect(f.calls.create + f.calls.upload).toBe(0)
+})
+
+test('closing a product form explicitly discards only its draft', async ({ page }) => {
+  await harness(page)
+  await page.getByRole('button', { name: 'Nuevo producto', exact: true }).click()
+  await page.getByLabel('Nombre', { exact: true }).fill('DISCARDED')
+  await page.getByRole('button', { name: 'Cerrar formulario', exact: true }).click()
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Recuperar borrador', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Nuevo producto', exact: true }).click()
+  await expect(page.getByLabel('Nombre', { exact: true })).toHaveValue('')
+})
+
 test('new products default to available, reset when reopened and preserve unavailable products on edit', async ({ page }) => {
   const f = await harness(page, { available: false })
   await page.getByRole('button', { name: 'Editar producto', exact: true }).click()

@@ -34,6 +34,7 @@ import {
 import type { Category, Product, Store } from '../../types/database'
 import { createProductCreationCoordinator } from '../../services/productCreation'
 import { parseProductForm, productFormFromProduct, type ProductFormState as FormState } from './productForm'
+import { productDrafts, sameDraftForm, type ProductDraft } from './productDraft'
 
 type Notice = {
   type: 'success' | 'error'
@@ -60,7 +61,7 @@ const imagePhaseLabels = {
   linked: 'Vinculada', uncertain: 'Verificacion pendiente', conflict: 'Conflicto',
 }
 
-export function ProductsPage({ store }: { store: Store }) {
+export function ProductsPage({ store, userId }: { store: Store; userId: string }) {
   const [products, setProducts] = useState<Product[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
@@ -79,6 +80,49 @@ export function ProductsPage({ store }: { store: Store }) {
   const [invalidImageSelection, setInvalidImageSelection] = useState(false)
   const [imageOperation, setImageOperation] = useState<ProductImageOperation | null>(null)
   const saveInFlight = useRef(false)
+  const drafts = useMemo(() => productDrafts(sessionStorage, userId, store.id), [userId, store.id])
+  const activeDraft = useRef<ProductDraft | null>(null)
+  const formValue = useRef<FormState>(emptyForm)
+  const [recoverableDraft, setRecoverableDraft] = useState<ProductDraft | null>(() => {
+    try { return drafts.latest() } catch { return null }
+  })
+  function persistDraft(nextForm = formValue.current, imagePending = activeDraft.current?.imagePending ?? false) {
+    const current = activeDraft.current
+    if (!current) return
+    try {
+      activeDraft.current = drafts.save({ ...current, form: nextForm, imagePending }, current)
+      setRecoverableDraft(activeDraft.current)
+    } catch {
+      setNotice({ type: 'error', message: 'No se pudo guardar el borrador local o existe uno mas reciente. No cierres la pagina; reabre el formulario antes de recuperar otro borrador.' })
+    }
+  }
+  const changeForm: Dispatch<SetStateAction<FormState>> = next => {
+    const value = typeof next === 'function' ? next(formValue.current) : next
+    formValue.current = value
+    setForm(value)
+    persistDraft(value)
+  }
+  function clearDraft() {
+    if (activeDraft.current) drafts.clear(activeDraft.current)
+    activeDraft.current = null
+    setRecoverableDraft(drafts.latest())
+  }
+  function openDraft(product: Product | null, initial: FormState) {
+    const existing = drafts.load(product?.id ?? null)
+    if (existing && product && existing.baseline && !sameDraftForm(existing.baseline, initial)) {
+      setRecoverableDraft(existing)
+      setNotice({ type: 'error', message: 'El producto cambio desde el borrador. No se reemplazaron los datos actuales. Puedes descartar el borrador recuperable.' })
+      return false
+    }
+    activeDraft.current = existing ?? drafts.save({ productId: product?.id ?? null,
+      form: initial, baseline: product ? initial : null, imagePending: false }, null)
+    formValue.current = { ...activeDraft.current.form }
+    setForm(formValue.current)
+    setNotice(existing ? { type: 'success', message: existing.imagePending
+      ? 'Borrador recuperado. Selecciona nuevamente la imagen pendiente; el archivo no se guarda en el borrador.'
+      : 'Borrador recuperado.' } : null)
+    return true
+  }
   const confirmedSave = useRef<{
     storeId: number; ownerId: Store['owner_user_id']; productId: number; input: ProductFormInput
   } | null>(null)
@@ -141,15 +185,14 @@ export function ProductsPage({ store }: { store: Store }) {
         setNotice({ type: 'success', message: 'Producto recuperado. Puedes continuar editandolo.' })
         return
       }
+      if (!openDraft(null, emptyForm)) return
       setEditingProduct(null)
       confirmedSave.current = null
-      setForm(emptyForm)
       setImageFile(null)
       setPreparedImage(null)
       setInvalidImageSelection(false)
       setImageOperation(null)
       setIsFormOpen(true)
-      setNotice(null)
     } catch (caughtError) {
       setNotice({ type: 'error', message: getErrorMessage(caughtError) })
     } finally {
@@ -167,6 +210,10 @@ export function ProductsPage({ store }: { store: Store }) {
       return
     }
     const nextForm = productFormFromProduct(product)
+    try { if (!openDraft(product, nextForm)) return } catch {
+      setNotice({ type: 'error', message: 'No se pudo abrir el borrador local. Revisa el almacenamiento del navegador.' })
+      return
+    }
     const normalized = parseProductForm(nextForm, categories, store.id)
     // Compare against the form's initial meaning, including display-only defaults.
     confirmedSave.current = 'value' in normalized ? {
@@ -174,12 +221,10 @@ export function ProductsPage({ store }: { store: Store }) {
       input: normalized.value,
     } : null
     setEditingProduct(product)
-    setForm(nextForm)
     setImageFile(null)
     setPreparedImage(null)
     setInvalidImageSelection(false)
     setIsFormOpen(true)
-    setNotice(null)
   }
 
   function closeForm() {
@@ -187,6 +232,10 @@ export function ProductsPage({ store }: { store: Store }) {
       return
     }
 
+    try { clearDraft() } catch {
+      setNotice({ type: 'error', message: 'No se pudo descartar el borrador local.' })
+      return
+    }
     setIsFormOpen(false)
     confirmedSave.current = null
     setEditingProduct(null)
@@ -203,8 +252,10 @@ export function ProductsPage({ store }: { store: Store }) {
       setImageFile(null)
       setPreparedImage(null)
       setInvalidImageSelection(false)
+      persistDraft(formValue.current, false)
       return
     }
+    persistDraft(formValue.current, true)
     saveInFlight.current = true
     setSaving(true)
     setPreparingImage(true)
@@ -219,6 +270,7 @@ export function ProductsPage({ store }: { store: Store }) {
       setImageFile(file)
       setPreparedImage(prepared)
       setInvalidImageSelection(false)
+      persistDraft(formValue.current, true)
       setNotice(null)
     } catch (caughtError) {
       setInvalidImageSelection(true)
@@ -238,6 +290,7 @@ export function ProductsPage({ store }: { store: Store }) {
       const result = await images.run(editingProduct.id, preparedImage ?? undefined)
       if (result.product) { setEditingProduct(result.product); replaceProduct(result.product) }
       if (result.status === 'linked') {
+        persistDraft(formValue.current, false)
         setImageOperation(null)
         setPreparedImage(null)
         setImageFile(null)
@@ -256,6 +309,7 @@ export function ProductsPage({ store }: { store: Store }) {
     if (saveInFlight.current || !editingProduct) return
     try {
       images.discard(editingProduct.id)
+      persistDraft(formValue.current, false)
       setImageOperation(null)
       setPreparedImage(null)
       setImageFile(null)
@@ -281,6 +335,9 @@ export function ProductsPage({ store }: { store: Store }) {
       setNotice(null)
 
       if ((imageFile || invalidImageSelection) && !preparedImage) throw new Error('Selecciona una imagen valida o quita la seleccion antes de guardar.')
+      if (activeDraft.current?.imagePending && !preparedImage && !imageOperation) {
+        throw new Error('Selecciona nuevamente la imagen pendiente o usa Quitar seleccion antes de guardar.')
+      }
       if (imageOperation && imageOperation.phase !== 'linked') {
         throw new Error('Hay una imagen pendiente. Usa Reintentar imagen antes de guardar otros cambios.')
       }
@@ -303,6 +360,18 @@ export function ProductsPage({ store }: { store: Store }) {
       // Persist the confirmed identity in UI before any later image operation.
       setEditingProduct(savedProduct)
       replaceProduct(savedProduct)
+      if (activeDraft.current) {
+        const previous = activeDraft.current
+        try {
+          activeDraft.current = drafts.save({ productId: savedProduct.id, form: formValue.current,
+            baseline: productFormFromProduct(savedProduct), imagePending: previous.imagePending },
+          previous.productId === savedProduct.id ? previous : null)
+          if (previous.productId !== savedProduct.id) drafts.clear(previous)
+          setRecoverableDraft(activeDraft.current)
+        } catch {
+          throw new Error('Producto guardado; no se pudo actualizar su borrador local. Conserva este formulario abierto.')
+        }
+      }
 
       if (preparedImage && imageFile) {
         phase = 'image'
@@ -325,6 +394,7 @@ export function ProductsPage({ store }: { store: Store }) {
           ? 'Producto actualizado correctamente.'
           : 'Producto creado correctamente.',
       })
+      try { clearDraft() } catch { setNotice({ type: 'success', message: 'Producto guardado. No se pudo limpiar el borrador local; no vuelvas a enviarlo.' }) }
       setIsFormOpen(false)
       confirmedSave.current = null
       setEditingProduct(null)
@@ -441,16 +511,33 @@ export function ProductsPage({ store }: { store: Store }) {
 
       {notice ? <NoticeBanner notice={notice} /> : null}
 
+      {!isFormOpen && recoverableDraft && <div className="mb-4 flex flex-wrap items-center gap-3" role="status">
+        <span className="text-sm">Hay un borrador de producto sin guardar.</span>
+        <button type="button" className="text-sm underline" disabled={loading || saving} onClick={() => {
+          if (recoverableDraft.productId === null) void openCreateForm()
+          else {
+            const product = products.find(row => row.id === recoverableDraft.productId)
+            if (product) openEditForm(product)
+            else setNotice({ type: 'error', message: 'El producto del borrador no esta disponible. No se creara otro producto.' })
+          }
+        }}>Recuperar borrador</button>
+        <button type="button" className="text-sm underline" onClick={() => {
+          try { drafts.clear(recoverableDraft); setRecoverableDraft(drafts.latest()) }
+          catch { setNotice({ type: 'error', message: 'No se pudo descartar el borrador.' }) }
+        }}>Descartar borrador</button>
+      </div>}
+
       {isFormOpen ? (
         <ProductForm
           form={form}
           preparingImage={preparingImage}
           isEditing={Boolean(editingProduct)}
           saving={saving}
-          setForm={setForm}
+          setForm={changeForm}
           categories={categories}
           editingProduct={editingProduct}
           imageFile={imageFile}
+          imageReselectionRequired={activeDraft.current?.imagePending === true}
           imageOperation={imageOperation}
           onImageChange={(file) => void handleImageChange(file)}
           onRetryImage={() => void retryImage()}
@@ -524,6 +611,7 @@ function ProductForm({
   categories,
   editingProduct,
   imageFile,
+  imageReselectionRequired,
   imageOperation,
   onRetryImage,
   onDiscardImage,
@@ -539,6 +627,7 @@ function ProductForm({
   categories: Category[]
   editingProduct: Product | null
   imageFile: File | null
+  imageReselectionRequired: boolean
   imageOperation: ProductImageOperation | null
   onRetryImage: () => void
   onDiscardImage: () => void
@@ -669,9 +758,11 @@ function ProductForm({
               className="sr-only"
               id="product-image"
               ref={imageInput}
-              onChange={(event) =>
-                onImageChange(event.target.files?.[0] ?? null)
-              }
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                event.target.value = ''
+                if (file) onImageChange(file)
+              }}
               type="file"
             />
             <p className="mt-2 break-all text-xs text-slate-500">
@@ -680,7 +771,7 @@ function ProductForm({
                 : 'PNG, JPG o WebP. Maximo 60 MB. Se optimiza automaticamente.'}
             </p>
             {preparingImage && <p role="status" className="mt-2 text-sm text-slate-600">Preparando imagen...</p>}
-            {imageFile ? (
+            {imageFile || imageReselectionRequired ? (
               <button
                 className="mt-2 text-xs font-medium text-slate-700 underline"
                 onClick={() => {
