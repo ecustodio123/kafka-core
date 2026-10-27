@@ -81,6 +81,7 @@ export type StoreFeatures = {
   commerce_enabled: boolean | null
   services_enabled: boolean | null
   staff_enabled: boolean | null
+  publications_enabled: boolean | null
 }
 export type ModuleFlags = Omit<StoreFeatures, 'store_id'>
 
@@ -100,9 +101,25 @@ export type StaffRecord = ModuleRecord & { name: string }
 type ServiceInsert = Pick<ServiceRecord, 'store_id' | 'title' | 'description' | 'sort_order' | 'is_active'>
 type StaffInsert = Pick<StaffRecord, 'store_id' | 'name' | 'title' | 'description' | 'sort_order' | 'is_active'>
 
+export type Publication = {
+  id: string; store_id: number; title: string; slug: string; summary: string | null
+  category: string | null; publication_type: 'document' | 'article'; content: string | null
+  pdf_storage_path: string | null; pdf_original_name: string | null; pdf_size_bytes: number | null
+  cover_storage_path: string | null; status: 'draft' | 'published' | 'archived'; display_order: number
+  published_at: string | null; created_by: string | null; created_at: string; updated_at: string
+}
+export type PublicationInput = Pick<Publication, 'title' | 'slug' | 'summary' | 'category' | 'publication_type' | 'status' | 'display_order'>
+type PublicationInsert = Pick<Publication, 'id' | 'store_id'> & PublicationInput
+
 export type Database = {
   public: {
     Tables: {
+      publications: {
+        Row: Publication
+        Insert: PublicationInsert
+        Update: Partial<PublicationInput & Pick<Publication, 'pdf_storage_path' | 'pdf_original_name' | 'pdf_size_bytes'>>
+        Relationships: []
+      }
       services: {
         Row: ServiceRecord
         Insert: ServiceInsert

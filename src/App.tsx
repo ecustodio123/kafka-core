@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
-import { Boxes, FolderTree, Loader2, LogOut, Package, Settings, Users, Wrench, RefreshCw, Save } from 'lucide-react'
+import { Boxes, FileText, FolderTree, Loader2, LogOut, Package, Settings, Users, Wrench, RefreshCw, Save } from 'lucide-react'
 import { AuthPage } from './features/auth/AuthPage'
 import { AcceptInvitePage } from './features/auth/AcceptInvitePage'
 import { CategoriesPage } from './features/categories/CategoriesPage'
 import { ProductsPage } from './features/products/ProductsPage'
 import { clearProductDrafts } from './features/products/productDraft'
 import { ContentPage } from './features/content/ContentPage'
+import { PublicationsPage } from './features/publications/PublicationsPage'
 import { allowedSections, resolveGlobalRole } from './features/stores/storeAccess'
 import type { AdminSection, GlobalRole } from './features/stores/storeAccess'
 import { Toggle } from './components/Toggle'
@@ -16,8 +17,8 @@ import { getUserStores } from './services/stores'
 import { moduleKeys } from './services/storeFeatures'
 import type { ModuleFlags, Store, StoreFeatures } from './types/database'
 
-const labels = { products: 'Productos', categories: 'Categorias', services: 'Servicios', staff: 'Staff', modules: 'Modulos' }
-const icons = { products: Package, categories: FolderTree, services: Wrench, staff: Users, modules: Settings }
+const labels = { products: 'Productos', categories: 'Categorias', services: 'Servicios', staff: 'Staff', publications: 'Publicaciones', modules: 'Modulos' }
+const icons = { products: Package, categories: FolderTree, services: Wrench, staff: Users, publications: FileText, modules: Settings }
 const buttonClass = 'inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium disabled:opacity-50 hover:bg-slate-50'
 
 export default function App() {
@@ -119,7 +120,7 @@ function StoreWorkspace({ store, userId, role }: { store: Store; userId: string;
       <nav aria-label="Modulos de Kafka Admin" className="space-y-1">
         {sections.map(item => {
           const Icon = icons[item]
-          const disabled = (item === 'services' && features.row?.services_enabled !== true) || (item === 'staff' && features.row?.staff_enabled !== true)
+          const disabled = (item === 'services' && features.row?.services_enabled !== true) || (item === 'staff' && features.row?.staff_enabled !== true) || (item === 'publications' && features.row?.publications_enabled !== true)
           return <button key={item} onClick={() => setSection(item)} aria-current={active === item ? 'page' : undefined}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-left text-sm font-medium ${active === item ? 'bg-slate-950 text-white' : 'text-slate-700 hover:bg-slate-100'}`}>
             <Icon size={18} aria-hidden="true" /><span>{labels[item]}{disabled && <span className="block text-xs font-normal">Deshabilitado</span>}</span>
@@ -133,6 +134,7 @@ function StoreWorkspace({ store, userId, role }: { store: Store; userId: string;
       {active === 'categories' && <CategoriesPage store={store} />}
       {active === 'modules' && <ModuleSettings row={features.row} superAdmin={role === 'super_admin'} saving={features.saving} save={features.save} reload={features.reload} />}
       {(active === 'services' || active === 'staff') && <ContentPage key={active} kind={active} store={store} enabled={features.row?.[active === 'services' ? 'services_enabled' : 'staff_enabled'] === true} />}
+      {active === 'publications' && <PublicationsPage store={store} enabled={features.row?.publications_enabled === true} />}
     </main>
   </div>
 }
@@ -143,6 +145,7 @@ function ModuleSettings({ row, superAdmin, saving, save, reload }: {
 }) {
   const [draft, setDraft] = useState<ModuleFlags>(() => ({
     commerce_enabled: row?.commerce_enabled === true, services_enabled: row?.services_enabled === true, staff_enabled: row?.staff_enabled === true,
+    publications_enabled: row?.publications_enabled === true,
   }))
   const [message, setMessage] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
@@ -164,6 +167,7 @@ function ModuleSettings({ row, superAdmin, saving, save, reload }: {
       <Toggle label="Commerce" checked={draft.commerce_enabled === true} onChange={value => setDraft(s => ({ ...s, commerce_enabled: value }))} />
       <Toggle label="Servicios" checked={draft.services_enabled === true} onChange={value => setDraft(s => ({ ...s, services_enabled: value }))} />
       <Toggle label="Staff" checked={draft.staff_enabled === true} onChange={value => setDraft(s => ({ ...s, staff_enabled: value }))} />
+      <Toggle label="Publicaciones" checked={draft.publications_enabled === true} onChange={value => setDraft(s => ({ ...s, publications_enabled: value }))} />
       {superAdmin && <button className={buttonClass} disabled={Boolean(unchanged)} onClick={() => void submit()}><Save size={16} />{saving ? 'Guardando...' : row ? 'Guardar cambios' : 'Crear configuracion'}</button>}
     </fieldset>
     {!superAdmin && <p className="text-sm text-slate-600">Solo Super Admin puede modificar los modulos.</p>}

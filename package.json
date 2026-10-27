@@ -4,6 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "test:publications:unit": "node --test scripts/publications.unit.test.mjs",
+    "test:publications:sql": "node --test scripts/publications.sql.test.mjs",
+    "test:publications:browser": "playwright test --config tests/admin-navigation/playwright.config.ts publications.spec.ts",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",

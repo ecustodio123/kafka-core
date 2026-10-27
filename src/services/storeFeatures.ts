@@ -1,8 +1,8 @@
 import { getSupabaseClient } from '../lib/supabase'
 import type { ModuleFlags, StoreFeatures } from '../types/database'
 
-const columns = 'store_id, commerce_enabled, services_enabled, staff_enabled'
-export const moduleKeys = ['commerce_enabled', 'services_enabled', 'staff_enabled'] as const
+const columns = 'store_id, commerce_enabled, services_enabled, staff_enabled, publications_enabled'
+export const moduleKeys = ['commerce_enabled', 'services_enabled', 'staff_enabled', 'publications_enabled'] as const
 
 export async function getStoreFeatures(storeId: number): Promise<StoreFeatures | null> {
   const { data, error } = await getSupabaseClient().from('store_features').select(columns).eq('store_id', storeId).maybeSingle()

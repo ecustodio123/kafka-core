@@ -6,7 +6,7 @@ const stores = [
   { id: 2, name: 'Beta', slug: 'beta', owner_user_id: '22222222-2222-4222-8222-222222222222' },
   { id: 3, name: 'Legacy', slug: 'legacy', owner_user_id: owner },
 ]
-type Flags = { store_id: number; commerce_enabled: boolean; services_enabled: boolean; staff_enabled: boolean }
+type Flags = { store_id: number; commerce_enabled: boolean; services_enabled: boolean; staff_enabled: boolean; publications_enabled: boolean }
 async function setup(page: Page, role: string | null = 'admin') {
   const metadata = role === null ? {} : { global_role: role }
   await page.addInitScript(({ owner, metadata }) => {
@@ -15,7 +15,7 @@ async function setup(page: Page, role: string | null = 'admin') {
     localStorage.setItem('sb-127-auth-token', JSON.stringify({ access_token: token, refresh_token: 'local-test-only', token_type: 'bearer', expires_at: Math.floor(Date.now() / 1000) + 3600,
       user: { id: owner, email: 'owner@example.com', app_metadata: metadata, user_metadata: {}, aud: 'authenticated' } }))
   }, { owner, metadata })
-  const db = new Map<number, Flags>([[1, { store_id: 1, commerce_enabled: true, services_enabled: true, staff_enabled: false }], [2, { store_id: 2, commerce_enabled: true, services_enabled: false, staff_enabled: false }]])
+  const db = new Map<number, Flags>([[1, { store_id: 1, commerce_enabled: true, services_enabled: true, staff_enabled: false, publications_enabled: false }], [2, { store_id: 2, commerce_enabled: true, services_enabled: false, staff_enabled: false, publications_enabled: false }]])
   const calls = { writes: 0, products: [] as number[], categories: [] as number[], external: 0, featureReads: [] as number[] }
   const behavior = { failRead: false, failSave: false, conflict: false, delay: 0, productDelay: 0 }
   await page.route('**/*', async route => {
@@ -40,7 +40,7 @@ async function setup(page: Page, role: string | null = 'admin') {
       if (behavior.failSave) return route.fulfill({ status: 403, json: { message: 'local denial' } })
       if (req.method() === 'PATCH') {
         const row = db.get(id)!
-        for (const key of ['commerce_enabled', 'services_enabled', 'staff_enabled'] as const) expect(url.searchParams.get(key)).toBe(`eq.${row[key]}`)
+        for (const key of ['commerce_enabled', 'services_enabled', 'staff_enabled', 'publications_enabled'] as const) expect(url.searchParams.get(key)).toBe(`eq.${row[key]}`)
         if (behavior.conflict) return route.fulfill({ json: [] })
         const next = { ...row, ...req.postDataJSON() }; db.set(id, next)
         return route.fulfill({ json: [next] })
@@ -113,7 +113,7 @@ test('super admin explicitly creates missing flags; no writes on opening', async
   await page.getByRole('button', { name: 'Crear configuracion' }).dblclick()
   await expect(page.getByText('Configuracion guardada.')).toBeVisible()
   expect(calls.writes).toBe(1)
-  expect(db.get(3)).toEqual({ store_id: 3, commerce_enabled: false, services_enabled: false, staff_enabled: false })
+  expect(db.get(3)).toEqual({ store_id: 3, commerce_enabled: false, services_enabled: false, staff_enabled: false, publications_enabled: false })
 })
 
 test('explicit save toggles flags and reports success', async ({ page }) => {
@@ -127,7 +127,7 @@ test('explicit save toggles flags and reports success', async ({ page }) => {
 
 test('disabled commerce blocks owner catalog without applying legacy fallback', async ({ page }) => {
   const { db } = await setup(page)
-  db.set(3, { store_id: 3, commerce_enabled: false, services_enabled: false, staff_enabled: false })
+  db.set(3, { store_id: 3, commerce_enabled: false, services_enabled: false, staff_enabled: false, publications_enabled: false })
   await page.getByLabel('Tienda', { exact: true }).selectOption('3')
   await expect(page.getByRole('heading', { name: 'Modulos de la tienda' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Productos', exact: true })).toHaveCount(0)

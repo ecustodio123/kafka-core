@@ -1,7 +1,7 @@
 import type { Store, StoreFeatures } from '../../types/database.ts'
 
 export type GlobalRole = 'super_admin' | 'admin'
-export type AdminSection = 'products' | 'categories' | 'services' | 'staff' | 'modules'
+export type AdminSection = 'products' | 'categories' | 'services' | 'staff' | 'publications' | 'modules'
 
 export function resolveGlobalRole(metadata: Record<string, unknown>, stores: Store[], userId: string): GlobalRole | null {
   if (metadata.global_role === 'super_admin' || metadata.global_role === 'admin') return metadata.global_role
@@ -15,6 +15,7 @@ export function allowedSections(role: GlobalRole, userId: string, store: Store, 
   if (store.owner_user_id === userId && (!features || features.commerce_enabled === true)) sections.push('products', 'categories')
   if (role === 'super_admin' || features?.services_enabled === true) sections.push('services')
   if (role === 'super_admin' || features?.staff_enabled === true) sections.push('staff')
+  if (role === 'super_admin' || (store.owner_user_id === userId && features?.publications_enabled === true)) sections.push('publications')
   sections.push('modules')
   return sections
 }
