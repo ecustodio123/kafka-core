@@ -1,3 +1,6 @@
+import { RecoveryBoundary } from '../../components/RecoveryBoundary'
+import { productBrowserStorage } from '../../services/productBrowserStorage'
+import { imageDiagnostics } from '../../services/imageDiagnostics'
 import { Toggle } from '../../components/Toggle'
 import { cleanupCatalogImages, reportCatalogCleanup, deleteCatalogEntity } from '../../services/catalogDeletion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -61,7 +64,10 @@ const imagePhaseLabels = {
   linked: 'Vinculada', uncertain: 'Verificacion pendiente', conflict: 'Conflicto',
 }
 
-export function ProductsPage({ store, userId }: { store: Store; userId: string }) {
+export function ProductsPage(props: { store: Store; userId: string }) {
+  return <RecoveryBoundary key={`${props.userId}.${props.store.id}`}><ProductsEditor {...props} /></RecoveryBoundary>
+}
+function ProductsEditor({ store, userId }: { store: Store; userId: string }) {
   const [products, setProducts] = useState<Product[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
@@ -80,7 +86,21 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
   const [invalidImageSelection, setInvalidImageSelection] = useState(false)
   const [imageOperation, setImageOperation] = useState<ProductImageOperation | null>(null)
   const saveInFlight = useRef(false)
-  const drafts = useMemo(() => productDrafts(sessionStorage, userId, store.id), [userId, store.id])
+  const [browserStorage] = useState(() => productBrowserStorage())
+  const [draftWarning, setDraftWarning] = useState<string | null>(null)
+  const imagePreparation = useRef<AbortController | null>(null)
+  const mounted = useRef(true)
+  const diagnostics = useMemo(() => imageDiagnostics(userId, store.id), [userId, store.id])
+  const diagnostic = useRef<ReturnType<typeof diagnostics.start> | null>(null)
+  const drafts = useMemo(() => productDrafts(browserStorage.drafts, userId, store.id), [browserStorage, userId, store.id])
+  function warnDraft() {
+    if (browserStorage.unavailable()) setDraftWarning('No se puede guardar un borrador recuperable en este navegador. No cierres la pagina. Las operaciones que requieren recuperacion local no se enviaran.')
+  }
+  useEffect(() => {
+    mounted.current = true
+    diagnostics.recover()
+    return () => { mounted.current = false; imagePreparation.current?.abort(); diagnostic.current?.stage('canceled') }
+  }, [diagnostics])
   const activeDraft = useRef<ProductDraft | null>(null)
   const formValue = useRef<FormState>(emptyForm)
   const [recoverableDraft, setRecoverableDraft] = useState<ProductDraft | null>(() => {
@@ -92,8 +112,9 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
     try {
       activeDraft.current = drafts.save({ ...current, form: nextForm, imagePending }, current)
       setRecoverableDraft(activeDraft.current)
+      warnDraft()
     } catch {
-      setNotice({ type: 'error', message: 'No se pudo guardar el borrador local o existe uno mas reciente. No cierres la pagina; reabre el formulario antes de recuperar otro borrador.' })
+      setDraftWarning('No se pudo guardar el borrador local o existe uno mas reciente. No cierres la pagina; reabre el formulario antes de recuperar otro borrador.')
     }
   }
   const changeForm: Dispatch<SetStateAction<FormState>> = next => {
@@ -106,6 +127,7 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
     if (activeDraft.current) drafts.clear(activeDraft.current)
     activeDraft.current = null
     setRecoverableDraft(drafts.latest())
+    warnDraft()
   }
   function openDraft(product: Product | null, initial: FormState) {
     const existing = drafts.load(product?.id ?? null)
@@ -116,6 +138,7 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
     }
     activeDraft.current = existing ?? drafts.save({ productId: product?.id ?? null,
       form: initial, baseline: product ? initial : null, imagePending: false }, null)
+    warnDraft()
     formValue.current = { ...activeDraft.current.form }
     setForm(formValue.current)
     setNotice(existing ? { type: 'success', message: existing.imagePending
@@ -127,17 +150,17 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
     storeId: number; ownerId: Store['owner_user_id']; productId: number; input: ProductFormInput
   } | null>(null)
   const images = useMemo(() => productImageCoordinator(
-    store.owner_user_id ?? 'unassigned', store.id, setImageOperation,
+    store.owner_user_id ?? 'unassigned', store.id, operation => {
+      if (mounted.current) setImageOperation(operation)
+      const stage = { uploading: 'upload_started', uploaded: 'upload_completed', linked: 'associated', uncertain: 'failed', conflict: 'failed' } as const
+      if (operation.phase in stage) diagnostic.current?.stage(stage[operation.phase as keyof typeof stage])
+    },
   ), [store.id, store.owner_user_id])
   const creation = useMemo(() => createProductCreationCoordinator(
     store.owner_user_id ?? 'unassigned', store.id,
-    {
-      getItem: (key) => sessionStorage.getItem(key),
-      setItem: (key, value) => sessionStorage.setItem(key, value),
-      removeItem: (key) => sessionStorage.removeItem(key),
-    },
+    browserStorage.durable,
     (operationId, input) => createProduct(store.id, operationId, input),
-  ), [store.id, store.owner_user_id])
+  ), [store.id, store.owner_user_id, browserStorage])
 
   const loadProducts = useCallback(async () => {
     try {
@@ -147,12 +170,11 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
         getProducts(store.id),
         listCategories(store.id),
       ])
-      setProducts(nextProducts)
-      setCategories(nextCategories)
+      if (mounted.current) { setProducts(nextProducts); setCategories(nextCategories) }
     } catch (caughtError) {
-      setError(getErrorMessage(caughtError))
+      if (mounted.current) setError(getErrorMessage(caughtError))
     } finally {
-      setLoading(false)
+      if (mounted.current) setLoading(false)
     }
   }, [store.id])
 
@@ -178,7 +200,11 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
     saveInFlight.current = true
     setSaving(true)
     try {
-      const recovered = await creation.recover()
+      let recovered: Product | null = null
+      try { recovered = await creation.recover() } catch (error) {
+        if (!browserStorage.unavailable()) throw error
+        warnDraft()
+      }
       if (recovered) {
         replaceProduct(recovered)
         openEditForm(recovered, true)
@@ -204,7 +230,12 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
   function openEditForm(product: Product, recovering = false) {
     if (saveInFlight.current && !recovering) return
     try {
-      setImageOperation(images.load(product.id))
+      try { setImageOperation(images.load(product.id)) } catch (error) {
+        // An unavailable receipt store must not crash or prevent editing fields. Writes still fail closed.
+        try { browserStorage.durable.getItem('kafka.storage-check') } catch { warnDraft() }
+        if (!browserStorage.unavailable()) throw error
+        setImageOperation(null)
+      }
     } catch (caughtError) {
       setNotice({ type: 'error', message: getErrorMessage(caughtError) })
       return
@@ -228,6 +259,10 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
   }
 
   function closeForm() {
+    if (imagePreparation.current) {
+      imagePreparation.current.abort(); imagePreparation.current = null
+      diagnostic.current?.stage('canceled'); saveInFlight.current = false; setSaving(false); setPreparingImage(false)
+    }
     if (saveInFlight.current) {
       return
     }
@@ -247,12 +282,18 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
   }
 
   async function handleImageChange(file: File | null) {
-    if (saveInFlight.current) return
+    if (saveInFlight.current && !imagePreparation.current) return
+    imagePreparation.current?.abort()
+    diagnostic.current?.stage('canceled')
+    const controller = new AbortController()
+    imagePreparation.current = controller
     if (!file) {
       setImageFile(null)
       setPreparedImage(null)
       setInvalidImageSelection(false)
       persistDraft(formValue.current, false)
+      imagePreparation.current = null
+      saveInFlight.current = false; setSaving(false); setPreparingImage(false)
       return
     }
     persistDraft(formValue.current, true)
@@ -260,7 +301,10 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
     setSaving(true)
     setPreparingImage(true)
     try {
-      const prepared = await prepareProductImage(file)
+      const trace = diagnostics.start()
+      diagnostic.current = trace
+      const prepared = await prepareProductImage(file, undefined, undefined, { signal: controller.signal, stage: stage => { if (!controller.signal.aborted) trace.stage(stage) } })
+      if (controller.signal.aborted || imagePreparation.current !== controller) return
       if (imageOperation && imageOperation.phase !== 'linked') {
         if (prepared.sha256 !== imageOperation.sha256 || prepared.size !== imageOperation.size) {
           throw new Error('Hay otra imagen pendiente. Reintenta o descarta ese cambio antes de seleccionar una distinta.')
@@ -273,12 +317,17 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
       persistDraft(formValue.current, true)
       setNotice(null)
     } catch (caughtError) {
+      if (controller.signal.aborted || imagePreparation.current !== controller) return
+      diagnostic.current?.stage('failed')
       setInvalidImageSelection(true)
       setNotice({ type: 'error', message: getErrorMessage(caughtError) })
     } finally {
-      setPreparingImage(false)
-      saveInFlight.current = false
-      setSaving(false)
+      if (imagePreparation.current === controller && !controller.signal.aborted) {
+        imagePreparation.current = null
+        setPreparingImage(false)
+        saveInFlight.current = false
+        setSaving(false)
+      }
     }
   }
 
@@ -509,6 +558,11 @@ export function ProductsPage({ store, userId }: { store: Store; userId: string }
         <Metric label="En oferta" value={offerCount} />
       </div>
 
+      {preparingImage && <button type="button" className="mb-3 underline" onClick={() => {
+        imagePreparation.current?.abort(); imagePreparation.current = null; diagnostic.current?.stage('canceled')
+        saveInFlight.current = false; setSaving(false); setPreparingImage(false)
+      }}>Cancelar preparacion de imagen</button>}
+      {draftWarning && <p role="alert" className="mb-4 rounded border border-amber-400 bg-amber-50 p-3">{draftWarning}</p>}
       {notice ? <NoticeBanner notice={notice} /> : null}
 
       {!isFormOpen && recoverableDraft && <div className="mb-4 flex flex-wrap items-center gap-3" role="status">
@@ -651,7 +705,7 @@ function ProductForm({
       className="mb-5 scroll-mt-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
       onSubmit={onSubmit}
     >
-      <fieldset className="min-w-0" disabled={saving}>
+      <fieldset className="min-w-0" disabled={saving && !preparingImage}>
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
           <h3 className="text-base font-semibold text-slate-950">
@@ -787,10 +841,10 @@ function ProductForm({
               <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-200 pt-3" role="status">
                 <p className="text-sm text-slate-600">Imagen pendiente: {imagePhaseLabels[imageOperation.phase]}</p>
                 <div className="flex shrink-0 gap-2">
-                  <button aria-label="Reintentar imagen" title="Reintentar imagen" className="rounded-md border border-slate-300 p-2" type="button" onClick={onRetryImage}>
+                  <button disabled={saving} aria-label="Reintentar imagen" title="Reintentar imagen" className="rounded-md border border-slate-300 p-2" type="button" onClick={onRetryImage}>
                     <RefreshCw aria-hidden="true" size={16} />
                   </button>
-                  <button aria-label="Descartar cambio de imagen" title="Descartar cambio sin borrar archivos" className="rounded-md border border-slate-300 p-2" type="button" onClick={onDiscardImage}>
+                  <button disabled={saving} aria-label="Descartar cambio de imagen" title="Descartar cambio sin borrar archivos" className="rounded-md border border-slate-300 p-2" type="button" onClick={onDiscardImage}>
                     <X aria-hidden="true" size={16} />
                   </button>
                 </div>

@@ -1,3 +1,4 @@
+import { checkImageTask, imageTask, readImageBytes, IMAGE_TIMEOUTS, type ImageTaskOptions } from './imageTask.ts'
 import { convertImageToWebp, optimizeImage } from './imageProcessing.ts'
 import { MAX_PRODUCT_IMAGE_BYTES } from './productImageHeader.ts'
 
@@ -13,9 +14,12 @@ export async function prepareProductImage(
   file: File,
   convert: typeof convertImageToWebp = convertImageToWebp,
   maxOutputBytes = MAX_PRODUCT_IMAGE_BYTES,
+  options: ImageTaskOptions = {},
 ): Promise<PreparedProductImage> {
-  const blob = await optimizeImage(file, maxOutputBytes, convert)
-  const bytes = await blob.arrayBuffer()
-  const sha256 = await imageDigest(bytes)
+  const blob = await optimizeImage(file, maxOutputBytes, convert, options)
+  const bytes = await readImageBytes(blob, options.signal)
+  const sha256 = await imageTask<string>((resolve, reject) => { void imageDigest(bytes).then(resolve, reject) }, IMAGE_TIMEOUTS.read, options.signal)
+  checkImageTask(options.signal)
+  options.stage?.('hashed')
   return { selectionId: crypto.randomUUID(), blob, sha256, size: blob.size }
 }

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ProductsPage } from '../../src/features/products/ProductsPage'
 import { prepareProductImage } from '../../src/services/productImagePreparation'
@@ -7,9 +8,15 @@ import { prepareCategoryImage, uploadCategoryImage } from '../../src/services/ca
 import '../../src/index.css'
 
 Object.assign(window, { imageTests: { prepareProductImage, convertImageToWebp, optimizeImage, prepareModuleImage, prepareCategoryImage, uploadCategoryImage } })
-createRoot(document.getElementById('root')!).render(
+export function StabilityHarness() {
+  const [visible, setVisible] = useState(true)
+  const [storeId, setStoreId] = useState(1)
+  return <><div><button onClick={() => setVisible(v => !v)}>Test navegar</button><button onClick={() => setStoreId(v => v === 1 ? 2 : 1)}>Test cambiar tienda</button></div>{visible && <HarnessProducts key={storeId} storeId={storeId} />}</>
+}
+export function HarnessProducts({ storeId }: { storeId: number }) { return (
   <main className="px-4 py-6 sm:px-6 lg:px-8">
-  <ProductsPage userId="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" store={{ id: 1, name: 'LOCAL STORE', slug: 'local-store',
+  <ProductsPage userId="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" store={{ id: storeId, name: 'LOCAL STORE', slug: 'local-store',
     owner_user_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', created_at: '2026-10-17T00:00:00Z' }} />
-  </main>,
-)
+  </main>
+) }
+createRoot(document.getElementById('root')!, { onCaughtError: () => {} }).render(<StabilityHarness />)

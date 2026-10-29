@@ -829,3 +829,203 @@ test('failed metadata save does not advance the baseline or upload an image', as
   expect(f.calls.metadata).toBe(2); expect(f.db.product.price).toBe(25)
   expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1)
 })
+
+// Stability regressions: all HTTP is intercepted by harness; no remote data is used.
+for (const mode of ['create', 'edit'] as const) {
+  test(`stability ${mode}: render failure is contained and the draft can be recovered`, async ({ page }) => {
+    const f = await harness(page)
+    await page.getByRole('button', { name: mode === 'create' ? 'Nuevo producto' : 'Editar producto', exact: true }).click()
+    await page.locator('#product-name').fill('RECOVERABLE TEXT')
+    const bytes = await png(page)
+    await page.locator('#product-image').evaluate((input: HTMLInputElement, bytes) => {
+      const file = new File([new Uint8Array(bytes)], 'private.png', { type: 'image/png' })
+      const transfer = new DataTransfer(); transfer.items.add(file); input.files = transfer.files
+      const descriptor = Object.getOwnPropertyDescriptor(File.prototype, 'name')!
+      Object.defineProperty(File.prototype, 'name', { configurable: true, get() { throw new Error('synthetic render failure') } })
+      Object.assign(window, { restoreFileName: () => Object.defineProperty(File.prototype, 'name', descriptor) })
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    }, [...bytes])
+    await expect(page.getByText('No se pudo mostrar esta pantalla')).toBeVisible()
+    await page.evaluate(() => (window as unknown as { restoreFileName: () => void }).restoreFileName())
+    await page.getByRole('button', { name: 'Volver a intentar', exact: true }).click()
+    await page.getByRole('button', { name: 'Recuperar borrador', exact: true }).click()
+    await expect(page.locator('#product-name')).toHaveValue('RECOVERABLE TEXT')
+    expect(f.calls.create + f.calls.metadata + f.calls.upload).toBe(0)
+  })
+  test(`stability ${mode}: blocked sessionStorage never blanks the form or sends unsafe writes`, async ({ page }) => {
+    await page.addInitScript(() => Object.defineProperty(window, 'sessionStorage', { get() { throw new DOMException('blocked', 'SecurityError') } }))
+    const f = await harness(page)
+    await page.getByRole('button', { name: mode === 'create' ? 'Nuevo producto' : 'Editar producto', exact: true }).click()
+    await page.locator('#product-name').fill('IN MEMORY')
+    await page.locator('#product-price').fill('20')
+    await page.locator('#product-image').setInputFiles({ name: 'private.png', mimeType: 'image/png', buffer: await png(page) })
+    await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+    await expect(page.getByText(/No se puede guardar un borrador recuperable/)).toBeVisible()
+    await expect(page.locator('#product-name')).toHaveValue('IN MEMORY')
+    expect(f.calls.upload + f.calls.create).toBe(0)
+  })
+}
+
+test('stability: quota warning survives successful image preparation', async ({ page }) => {
+  await harness(page)
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+  await page.evaluate(() => { Storage.prototype.setItem = () => { throw new DOMException('full', 'QuotaExceededError') } })
+  await page.locator('#product-name').fill('UNSAVED TEXT')
+  await page.locator('#product-image').setInputFiles({ name: 'private.png', mimeType: 'image/png', buffer: await png(page) })
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await expect(page.getByText(/No se puede guardar un borrador recuperable/)).toBeVisible()
+  await expect(page.locator('#product-name')).toHaveValue('UNSAVED TEXT')
+})
+
+for (const failure of ['read', 'fallback', 'canvas'] as const) {
+  test(`stability: ${failure} that never resolves times out and preserves fields`, async ({ page }) => {
+    const f = await harness(page)
+    await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+    await page.locator('#product-name').fill('PRESERVED')
+    const bytes = await png(page)
+    await page.evaluate(failure => {
+      const native = window.setTimeout.bind(window)
+      const deadline = { read: 5000, fallback: 8000, canvas: 10000 }[failure]
+      window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => native(handler, delay === deadline ? 100 : delay, ...args)) as typeof setTimeout
+      if (failure === 'read') FileReader.prototype.readAsArrayBuffer = function () { /* intentionally stalled */ }
+      if (failure === 'canvas') HTMLCanvasElement.prototype.toBlob = function () { /* intentionally stalled */ }
+      if (failure === 'fallback') {
+        Object.defineProperty(window, 'createImageBitmap', { value: undefined, configurable: true })
+        Object.defineProperty(window, 'Image', { value: function () {
+          const image = document.createElement('img')
+          Object.defineProperty(image, 'src', { set() { /* no load/error callback */ } })
+          return image
+        }, configurable: true })
+      }
+    }, failure)
+    await page.locator('#product-image').setInputFiles({ name: 'private.png', mimeType: 'image/png', buffer: bytes })
+    await expect(page.getByText(/La preparacion tardo demasiado/)).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+    await expect(page.locator('#product-name')).toHaveValue('PRESERVED')
+    expect(f.calls.create + f.calls.metadata + f.calls.upload).toBe(0)
+  })
+}
+
+for (const action of ['cancel', 'navigate', 'store', 'reselect'] as const) {
+  test(`stability: ${action} terminates pending workers and ignores obsolete results`, async ({ page }) => {
+    const f = await harness(page)
+    await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+    await page.locator('#product-name').fill('KEPT')
+    const bytes = await png(page)
+    await page.evaluate(() => {
+      const NativeWorker = Worker
+      const active = new Set<Worker>()
+      Object.assign(window, { activeImageWorkers: active })
+      window.Worker = class extends NativeWorker {
+        constructor(url: string | URL, options?: WorkerOptions) {
+          super(url, options); active.add(this)
+          // Hold the first header response. Work must terminate on cancellation.
+          Object.defineProperty(this, 'onmessage', { set() { /* intentionally held */ } })
+        }
+        terminate() { active.delete(this); super.terminate() }
+      }
+    })
+    await page.locator('#product-image').setInputFiles({ name: 'first.png', mimeType: 'image/png', buffer: bytes })
+    await expect.poll(() => page.evaluate(() => (window as unknown as { activeImageWorkers: Set<Worker> }).activeImageWorkers.size)).toBe(1)
+    if (action === 'cancel') await page.getByRole('button', { name: 'Cancelar preparacion de imagen' }).click()
+    if (action === 'navigate') await page.getByRole('button', { name: 'Test navegar' }).click()
+    if (action === 'store') await page.getByRole('button', { name: 'Test cambiar tienda' }).click()
+    if (action === 'reselect') {
+      await page.locator('#product-image').setInputFiles({ name: 'second.png', mimeType: 'image/png', buffer: bytes })
+      await expect.poll(() => page.evaluate(() => (window as unknown as { activeImageWorkers: Set<Worker> }).activeImageWorkers.size)).toBe(1)
+      await page.getByRole('button', { name: 'Cancelar preparacion de imagen' }).click()
+    }
+    await expect.poll(() => page.evaluate(() => (window as unknown as { activeImageWorkers: Set<Worker> }).activeImageWorkers.size)).toBe(0)
+    expect(f.calls.create + f.calls.metadata + f.calls.upload).toBe(0)
+    if (action === 'cancel' || action === 'reselect') await expect(page.locator('#product-name')).toHaveValue('KEPT')
+    if (action === 'navigate') {
+      await page.getByRole('button', { name: 'Test navegar' }).click()
+      await page.getByRole('button', { name: 'Recuperar borrador', exact: true }).click()
+      await expect(page.locator('#product-name')).toHaveValue('KEPT')
+    }
+    if (action === 'store') await expect(page.getByRole('button', { name: 'Recuperar borrador', exact: true })).toHaveCount(0)
+  })
+}
+
+test('stability: canvas allocation failure closes the decoded bitmap and allows re-selection', async ({ page }) => {
+  await harness(page)
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+  const bytes = await png(page)
+  await page.evaluate(() => {
+    const close = ImageBitmap.prototype.close
+    Object.assign(window, { bitmapCloses: 0 })
+    ImageBitmap.prototype.close = function () { (window as unknown as { bitmapCloses: number }).bitmapCloses++; close.call(this) }
+    const create = document.createElement.bind(document)
+    document.createElement = ((tag: string, options?: ElementCreationOptions) => {
+      if (tag === 'canvas') throw new Error('synthetic allocation failure')
+      return create(tag, options)
+    }) as typeof document.createElement
+  })
+  await page.locator('#product-image').setInputFiles({ name: 'private.png', mimeType: 'image/png', buffer: bytes })
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { bitmapCloses: number }).bitmapCloses)).toBe(1)
+  await expect(page.locator('#product-name')).toHaveValue('LOCAL PRODUCT')
+})
+
+for (const stage of ['read', 'decode'] as const) {
+  test(`stability: ${stage} rejection preserves a previous valid image and form`, async ({ page }) => {
+    const f = await harness(page)
+    await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+    const bytes = await png(page)
+    await page.locator('#product-image').setInputFiles({ name: 'first.png', mimeType: 'image/png', buffer: bytes })
+    await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+    await page.locator('#product-name').fill('PRESERVED NAME')
+    await page.evaluate(stage => {
+      if (stage === 'read') FileReader.prototype.readAsArrayBuffer = function () { this.dispatchEvent(new ProgressEvent('error')) }
+      else {
+        const Native = Worker
+        window.Worker = class extends Native {
+          constructor(url: string | URL, options?: WorkerOptions) {
+            super(url, options)
+            if (String(url).includes('imageResize.worker')) Object.defineProperty(this, 'onmessage', { set(callback) {
+              queueMicrotask(() => callback({ data: { failed: true } }))
+            } })
+          }
+        }
+        // Force the bounded HTML fallback to fail too.
+        Object.defineProperty(window, 'Image', { value: function () { throw new Error('synthetic decode error') } })
+      }
+    }, stage)
+    await page.locator('#product-image').setInputFiles({ name: 'second.png', mimeType: 'image/png', buffer: bytes })
+    await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+    await expect(page.getByText('first.png', { exact: true })).toBeVisible()
+    await expect(page.locator('#product-name')).toHaveValue('PRESERVED NAME')
+    expect(f.calls.create + f.calls.metadata + f.calls.upload + f.calls.link).toBe(0)
+  })
+}
+
+test('stability: late bitmap delivery after cancellation is closed without changing the form', async ({ page }) => {
+  const f = await harness(page)
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+  const bytes = await png(page)
+  await page.evaluate(async bytes => {
+    const bitmap = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }))
+    Object.assign(window, { lateBitmapClosed: 0, resizeStarted: false })
+    const close = bitmap.close.bind(bitmap)
+    bitmap.close = () => { (window as unknown as { lateBitmapClosed: number }).lateBitmapClosed++; close() }
+    const Native = Worker
+    window.Worker = class extends Native {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options)
+        if (String(url).includes('imageResize.worker')) {
+          Object.defineProperty(this, 'onmessage', { set(callback) {
+            (window as unknown as { resizeStarted: boolean }).resizeStarted = true
+            // Simulate an already queued transfer even though terminate() is called.
+            setTimeout(() => callback({ data: { bitmap } }), 500)
+          } })
+        }
+      }
+    }
+  }, [...bytes])
+  await page.locator('#product-image').setInputFiles({ name: 'private.png', mimeType: 'image/png', buffer: bytes })
+  await expect.poll(() => page.evaluate(() => (window as unknown as { resizeStarted: boolean }).resizeStarted)).toBe(true)
+  await page.getByRole('button', { name: 'Cancelar preparacion de imagen' }).click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { lateBitmapClosed: number }).lateBitmapClosed)).toBe(1)
+  await expect(page.locator('#product-name')).toHaveValue('LOCAL PRODUCT')
+  expect(f.calls.create + f.calls.metadata + f.calls.upload + f.calls.link).toBe(0)
+})
