@@ -1029,3 +1029,89 @@ test('stability: late bitmap delivery after cancellation is closed without chang
   await expect(page.locator('#product-name')).toHaveValue('LOCAL PRODUCT')
   expect(f.calls.create + f.calls.metadata + f.calls.upload + f.calls.link).toBe(0)
 })
+
+for (const feature of ['at', 'scrollIntoView', 'matchMedia', 'throwing-scroll', 'throwing-match'] as const) {
+  test(`hotfix: ${feature} missing or throwing cannot activate the boundary`, async ({ page }) => {
+    if (feature === 'at') await page.addInitScript(() => { Array.prototype.at = undefined as unknown as typeof Array.prototype.at })
+    const f = await harness(page)
+    await page.evaluate(feature => {
+      if (feature === 'scrollIntoView') Element.prototype.scrollIntoView = undefined as unknown as typeof Element.prototype.scrollIntoView
+      if (feature === 'matchMedia') window.matchMedia = undefined as unknown as typeof window.matchMedia
+      if (feature === 'throwing-scroll') Object.defineProperty(Element.prototype, 'scrollIntoView', { get() { throw new Error('optional API denied') } })
+      if (feature === 'throwing-match') window.matchMedia = () => { throw new Error('optional API denied') }
+    }, feature)
+    await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+    await expect(page.locator('#product-name')).toHaveValue('LOCAL PRODUCT')
+    await page.locator('#product-image').setInputFiles({ name: 'safe.png', mimeType: 'image/png', buffer: await png(page) })
+    await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+    await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+    await expect(page.getByText('Producto actualizado correctamente.')).toBeVisible()
+    await expect(page.getByText('No se pudo mostrar esta pantalla')).toHaveCount(0)
+    expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1)
+  })
+}
+
+test('hotfix: absent randomUUID and AbortSignal.timeout preserve secure creation and image association', async ({ page }) => {
+  const f = await harness(page)
+  await page.evaluate(() => {
+    Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: undefined })
+    Object.defineProperty(AbortSignal, 'timeout', { configurable: true, value: undefined })
+  })
+  await page.getByRole('button', { name: 'Nuevo producto', exact: true }).click()
+  await page.locator('#product-name').fill('SECURE COMPAT PRODUCT')
+  await page.locator('#product-price').fill('12')
+  await page.locator('#product-image').setInputFiles({ name: 'safe.png', mimeType: 'image/png', buffer: await png(page) })
+  await expect(page.getByRole('button', { name: 'Guardar', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+  await expect(page.getByText('Producto creado correctamente.')).toBeVisible()
+  expect(f.calls.create).toBe(1); expect(f.calls.upload).toBe(1); expect(f.calls.link).toBe(1)
+})
+
+test('hotfix: UI incident correlates last image stage, reports once and preserves the draft', async ({ page }) => {
+  const logs: string[] = []
+  page.on('console', message => { if (message.text().includes('ui_incident')) logs.push(message.text()) })
+  const f = await harness(page)
+  await page.getByRole('button', { name: 'Editar producto', exact: true }).click()
+  await page.locator('#product-name').fill('PRIVATE DRAFT CONTENT')
+  const bytes = await png(page)
+  await page.locator('#product-image').evaluate((input: HTMLInputElement, bytes) => {
+    const dt = new DataTransfer(); dt.items.add(new File([new Uint8Array(bytes)], 'customer-secret.png', { type: 'image/png' })); input.files = dt.files
+    const original = Object.getOwnPropertyDescriptor(File.prototype, 'name')!
+    Object.assign(window, { restoreName: () => Object.defineProperty(File.prototype, 'name', original) })
+    Object.defineProperty(File.prototype, 'name', { get() { throw new TypeError('customer-secret.png token=private') }, configurable: true })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  }, [...bytes])
+  await expect(page.getByText('No se pudo mostrar esta pantalla')).toBeVisible()
+  const report = await page.evaluate(() => JSON.parse(Object.entries(sessionStorage).find(([k]) => k.endsWith('.incidents'))![1]))
+  await expect(page.getByText(report.id, { exact: true })).toBeVisible()
+  expect(report.id).toMatch(/^KC-/); expect(report.module).toBe('products'); expect(report.version).toBe('123abcd456ef')
+  expect(report.image.stage).toBe('hashed'); expect(report.correlation).toBe('context_only')
+  expect(JSON.stringify(report)).not.toMatch(/customer-secret|PRIVATE DRAFT|token=/)
+  expect(logs).toHaveLength(1)
+  await page.evaluate(() => (window as unknown as { restoreName: () => void }).restoreName())
+  await page.getByRole('button', { name: 'Volver a intentar', exact: true }).click()
+  await page.getByRole('button', { name: 'Recuperar borrador', exact: true }).click()
+  await expect(page.locator('#product-name')).toHaveValue('PRIVATE DRAFT CONTENT')
+  expect(f.calls.create + f.calls.metadata + f.calls.upload + f.calls.link).toBe(0)
+})
+
+for (const kind of ['effect', 'persistent', 'reporter'] as const) {
+  test(`hotfix: ${kind} error stays recoverable even when instrumentation fails`, async ({ page }) => {
+    const f = await harness(page)
+    if (kind === 'reporter') await page.evaluate(() => {
+      Storage.prototype.setItem = () => { throw new Error('storage failure') }
+      console.error = () => { throw new Error('logging failure') }
+    })
+    await page.getByRole('button', { name: `Test fallo ${kind}`, exact: true }).click()
+    await expect(page.getByText('No se pudo mostrar esta pantalla')).toBeVisible()
+    await expect(page.getByText(/^KC-/, { exact: false })).toBeVisible()
+    await page.getByRole('button', { name: 'Volver a intentar', exact: true }).click()
+    await expect(page.getByText('No se pudo mostrar esta pantalla')).toBeVisible()
+    await page.getByRole('button', { name: 'Volver a intentar', exact: true }).click()
+    await expect(page.getByText(/El error persiste/)).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Volver a intentar', exact: true })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Ir a otro modulo', exact: true }).click()
+    await expect(page.getByText('LOCAL PRODUCT', { exact: true })).toBeVisible()
+    expect(f.calls.create + f.calls.metadata + f.calls.upload + f.calls.link).toBe(0)
+  })
+}

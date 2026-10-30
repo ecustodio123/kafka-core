@@ -1,3 +1,4 @@
+import { productUuid, withProductDeadline } from './productCompatibility.ts'
 import { getSupabaseClient } from '../lib/supabase'
 import { getProduct, setProductImagePath } from './products'
 import { imageDigest, MAX_PRODUCT_IMAGE_BYTES } from './productImagePreparation'
@@ -37,9 +38,10 @@ async function upload(o: ProductImageOperation, blob: Blob) {
 async function verify(o: ProductImageOperation): Promise<'match' | 'absent' | 'different' | 'unknown'> {
   validateOperation(o)
   try {
+    return await withProductDeadline(async signal => {
     const { data, error } = await getSupabaseClient().storage.from(PRODUCT_IMAGES_BUCKET)
-      .download(o.candidatePath, { cacheNonce: crypto.randomUUID() }, {
-        cache: 'no-store', signal: AbortSignal.timeout(15000),
+      .download(o.candidatePath, { cacheNonce: productUuid() }, {
+        cache: 'no-store', signal,
       }).asStream()
     if (error) {
       const coded = error as { status?: number; code?: string }
@@ -62,6 +64,7 @@ async function verify(o: ProductImageOperation): Promise<'match' | 'absent' | 'd
       }
     } finally { reader.releaseLock() }
     return length === o.size && await imageDigest(bytes.buffer) === o.sha256 ? 'match' : 'different'
+    })
   } catch { return 'unknown' }
 }
 

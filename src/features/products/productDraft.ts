@@ -1,3 +1,4 @@
+import { productUuid } from '../../services/productCompatibility.ts'
 import type { ProductFormState } from './productForm.ts'
 
 type DraftStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'>
@@ -46,7 +47,7 @@ export function productDrafts(storage: DraftStorage, userId: string, storeId: nu
       if ((current && current.revision !== expected?.revision) || (!current && expected)) {
         throw new Error('El borrador cambio o fue descartado. Reabre el formulario para recuperarlo.')
       }
-      const next: ProductDraft = { ...draft, version: 1, userId, storeId, revision: crypto.randomUUID() }
+      const next: ProductDraft = { ...draft, version: 1, userId, storeId, revision: productUuid() }
       storage.setItem(key(draft.productId), JSON.stringify(next))
       storage.setItem(latest, draft.productId === null ? 'create' : String(draft.productId))
       return next

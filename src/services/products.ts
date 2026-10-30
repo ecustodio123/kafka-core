@@ -1,3 +1,4 @@
+import { withProductDeadline } from './productCompatibility.ts'
 import { getSupabaseClient } from '../lib/supabase'
 import type {
   Product,
@@ -31,13 +32,13 @@ export async function createProduct(
   operationId: string,
   input: ProductFormInput | null,
 ): Promise<ProductCreationResult> {
-  const { data, error } = await getSupabaseClient()
+  const { data, error } = await withProductDeadline(signal => getSupabaseClient()
     .rpc('create_product_idempotent', {
       p_store_id: storeId,
       p_operation_id: operationId,
       p_input: input,
     })
-    .abortSignal(AbortSignal.timeout(15000))
+    .abortSignal(signal))
 
   if (error) {
     throw productCreationError(error)
@@ -98,8 +99,8 @@ export async function setProductImagePath(
     let request = getSupabaseClient().from('products')
       .update({ image_path: imagePath }).eq('id', productId).eq('store_id', storeId)
     request = expectedPath === null ? request.is('image_path', null) : request.eq('image_path', expectedPath)
-    const { data, error } = await request.select(PRODUCT_COLUMNS)
-      .abortSignal(AbortSignal.timeout(15000)).maybeSingle()
+    const { data, error } = await withProductDeadline(signal => request.select(PRODUCT_COLUMNS)
+      .abortSignal(signal).maybeSingle())
     if (!error && data) return { status: 'linked', product: data }
   } catch { /* An aborted response does not prove rollback. Read before retrying. */ }
   try {
@@ -111,8 +112,8 @@ export async function setProductImagePath(
 }
 
 export async function getProduct(storeId: number, productId: number): Promise<Product | null> {
-  const { data, error } = await getSupabaseClient().from('products').select(PRODUCT_COLUMNS)
-    .eq('id', productId).eq('store_id', storeId).abortSignal(AbortSignal.timeout(15000)).maybeSingle()
+  const { data, error } = await withProductDeadline(signal => getSupabaseClient().from('products').select(PRODUCT_COLUMNS)
+    .eq('id', productId).eq('store_id', storeId).abortSignal(signal).maybeSingle())
   if (error) throw new Error('No se pudo consultar el producto.')
   return data
 }

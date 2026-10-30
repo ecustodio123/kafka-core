@@ -1,3 +1,4 @@
+import { productAbortController } from './productCompatibility.ts'
 import { checkImageTask, imageTask, readImageBytes, IMAGE_TIMEOUTS, type ImageTaskOptions } from './imageTask.ts'
 import { inspectProductImageHeader, MAX_PRODUCT_IMAGE_BYTES, PRODUCT_IMAGE_LIMITS } from './productImageHeader.ts'
 import type { ImageDimensions } from './productImageHeader.ts'
@@ -42,7 +43,7 @@ export async function optimizeImage(
   convert: typeof convertImageToWebp = convertImageToWebp,
   options: ImageTaskOptions = {},
 ): Promise<Blob> {
-  const controller = new AbortController()
+  const controller = productAbortController()
   const cancel = () => controller.abort()
   options.signal?.addEventListener('abort', cancel, { once: true })
   if (options.signal?.aborted) cancel()

@@ -1,3 +1,4 @@
+import { productUuid } from './productCompatibility.ts'
 import type { Product } from '../types/database.ts'
 
 export type ProductCreationInput = {
@@ -34,7 +35,7 @@ export function createProductCreationCoordinator(
   storeId: number,
   storage: PendingStorage,
   transport: Transport,
-  newUuid = () => crypto.randomUUID(),
+  newUuid = () => productUuid(),
 ) {
   if (!ownerId || !Number.isSafeInteger(storeId) || storeId <= 0) {
     throw new Error('La tienda de la operacion no es valida.')

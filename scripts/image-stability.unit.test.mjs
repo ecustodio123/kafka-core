@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { productUuid, withProductDeadline } from '../src/services/productCompatibility.ts'
 import { imageTask, readImageBytes } from '../src/services/imageTask.ts'
 import { optimizeImage, MAX_IMAGE_HEADER_BYTES } from '../src/services/imageProcessing.ts'
 import { productBrowserStorage } from '../src/services/productBrowserStorage.ts'
-import { imageDiagnostics } from '../src/services/imageDiagnostics.ts'
+import { recordUIIncident, imageDiagnostics } from '../src/services/imageDiagnostics.ts'
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhX8AAAAASUVORK5CYII=', 'base64')
 const webp = new Blob([Buffer.from('UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA', 'base64')], { type: 'image/webp' })
 
@@ -83,4 +84,58 @@ test('diagnostics prune expired records and discard unapproved fields on next sc
     records.set(key, JSON.stringify([{ id: crypto.randomUUID(), stage: 'decoded', at: Date.now() - 25 * 60 * 60 * 1000 }]))
     imageDiagnostics('user', 1).recover(); assert.equal(records.has(key), false)
   } finally { if (previous) Object.defineProperty(globalThis, 'sessionStorage', previous); else delete globalThis.sessionStorage }
+})
+
+test('diagnostic recovery works with Array.at missing and keeps the pre-cancellation stage', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, 'at')
+  try {
+    Object.defineProperty(Array.prototype, 'at', { value: undefined, configurable: true })
+    const diagnostics = imageDiagnostics('compat', 1)
+    diagnostics.recover()
+    const trace = diagnostics.start(); trace.stage('decoded'); trace.stage('canceled')
+    assert.equal(diagnostics.snapshot().stage, 'decoded')
+    const report = diagnostics.incident(new TypeError('secret filename.png and token'), { componentStack: '\n at ProductForm (private)' })
+    assert.equal(report.image.stage, 'decoded'); assert.equal(report.correlation, 'context_only')
+    assert.deepEqual(report.components, ['ProductForm'])
+    assert.ok(!JSON.stringify(report).includes('filename')); assert.match(report.id, /^KC-/)
+  } finally { Object.defineProperty(Array.prototype, 'at', descriptor) }
+})
+
+test('incident sanitizer strips raw messages, paths, credentials, filenames and arbitrary frames', () => {
+  const error = new TypeError('token=secret filename=customer.jpg product=private')
+  error.stack = 'TypeError: secret\n at fn (https://private.example/assets/index-ABCdef12.js:41:8)\n at customer.jpg:2:8\n https://private.example/path?token=secret:1:1'
+  const incident = recordUIIncident(error, { componentStack: ' at ProductForm\n at CustomerSecret' }, 'products')
+  const serialized = JSON.stringify(incident)
+  for (const prohibited of ['secret', 'private.example', 'customer.jpg', 'CustomerSecret', 'token=', 'product=']) assert.ok(!serialized.includes(prohibited))
+  assert.deepEqual(incident.frames, [{ asset: 'index-ABCdef12.js', line: 41, column: 8 }])
+  assert.deepEqual(incident.components, ['ProductForm'])
+  assert.ok(serialized.length < 4096)
+})
+test('throwing error getters, console and storage cannot break incident reporting', () => {
+  const log = console.error; const previous = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
+  try {
+    console.error = () => { throw new Error('console unavailable') }
+    Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, get() { throw new Error('storage unavailable') } })
+    const hostile = new Proxy({}, { get() { throw new Error('do not disclose') } })
+    const incident = recordUIIncident(hostile, hostile)
+    assert.match(incident.id, /^KC-/); assert.equal(incident.category, 'react_boundary')
+    assert.ok(!JSON.stringify(incident).includes('disclose'))
+    const diag = imageDiagnostics('safe', 2); diag.recover(); diag.start().stage('failed')
+  } finally { console.error = log; if (previous) Object.defineProperty(globalThis, 'sessionStorage', previous); else delete globalThis.sessionStorage }
+})
+test('durable UUIDs use secure getRandomValues when randomUUID is absent; deadline does not need AbortSignal.timeout', async () => {
+  const uuid = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(crypto), 'randomUUID')
+  const ownUuid = Object.getOwnPropertyDescriptor(crypto, 'randomUUID')
+  const timeout = Object.getOwnPropertyDescriptor(AbortSignal, 'timeout')
+  try {
+    Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: undefined })
+    Object.defineProperty(AbortSignal, 'timeout', { configurable: true, value: undefined })
+    const a = productUuid(), b = productUuid()
+    assert.match(a, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+    assert.notEqual(a, b)
+    await assert.rejects(withProductDeadline(signal => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')))), 10), /aborted/)
+  } finally {
+    if (ownUuid) Object.defineProperty(crypto, 'randomUUID', ownUuid); else { delete crypto.randomUUID; if (uuid) assert.equal(typeof crypto.randomUUID, 'function') }
+    Object.defineProperty(AbortSignal, 'timeout', timeout)
+  }
 })

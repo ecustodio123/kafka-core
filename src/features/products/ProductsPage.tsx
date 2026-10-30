@@ -1,5 +1,6 @@
 import { RecoveryBoundary } from '../../components/RecoveryBoundary'
 import { productBrowserStorage } from '../../services/productBrowserStorage'
+import { productAbortController } from '../../services/productCompatibility'
 import { imageDiagnostics } from '../../services/imageDiagnostics'
 import { Toggle } from '../../components/Toggle'
 import { cleanupCatalogImages, reportCatalogCleanup, deleteCatalogEntity } from '../../services/catalogDeletion'
@@ -64,10 +65,11 @@ const imagePhaseLabels = {
   linked: 'Vinculada', uncertain: 'Verificacion pendiente', conflict: 'Conflicto',
 }
 
-export function ProductsPage(props: { store: Store; userId: string }) {
-  return <RecoveryBoundary key={`${props.userId}.${props.store.id}`}><ProductsEditor {...props} /></RecoveryBoundary>
+export function ProductsPage(props: { store: Store; userId: string; onLeave?: () => void }) {
+  const diagnostics = useMemo(() => imageDiagnostics(props.userId, props.store.id), [props.userId, props.store.id])
+  return <RecoveryBoundary onLeave={props.onLeave} module="products" report={(error, info) => diagnostics.incident(error, info)} key={`${props.userId}.${props.store.id}`}><ProductsEditor {...props} diagnostics={diagnostics} /></RecoveryBoundary>
 }
-function ProductsEditor({ store, userId }: { store: Store; userId: string }) {
+function ProductsEditor({ store, userId, diagnostics }: { store: Store; userId: string; diagnostics: ReturnType<typeof imageDiagnostics> }) {
   const [products, setProducts] = useState<Product[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
@@ -90,7 +92,6 @@ function ProductsEditor({ store, userId }: { store: Store; userId: string }) {
   const [draftWarning, setDraftWarning] = useState<string | null>(null)
   const imagePreparation = useRef<AbortController | null>(null)
   const mounted = useRef(true)
-  const diagnostics = useMemo(() => imageDiagnostics(userId, store.id), [userId, store.id])
   const diagnostic = useRef<ReturnType<typeof diagnostics.start> | null>(null)
   const drafts = useMemo(() => productDrafts(browserStorage.drafts, userId, store.id), [browserStorage, userId, store.id])
   function warnDraft() {
@@ -285,7 +286,11 @@ function ProductsEditor({ store, userId }: { store: Store; userId: string }) {
     if (saveInFlight.current && !imagePreparation.current) return
     imagePreparation.current?.abort()
     diagnostic.current?.stage('canceled')
-    const controller = new AbortController()
+    let controller: AbortController
+    try { controller = productAbortController() } catch (error) {
+      imagePreparation.current = null; saveInFlight.current = false; setSaving(false); setPreparingImage(false)
+      setNotice({ type: 'error', message: getErrorMessage(error) }); return
+    }
     imagePreparation.current = controller
     if (!file) {
       setImageFile(null)
@@ -694,10 +699,15 @@ function ProductForm({
   const editingProductId = editingProduct?.id
   useEffect(() => {
     if (editingProductId == null) return
-    formElement.current?.scrollIntoView({
-      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-      block: 'start',
-    })
+    const element = formElement.current
+    if (!element) return
+    try {
+      if (typeof element.scrollIntoView !== 'function') return
+      const reduced = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)').matches : true
+      element.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+    } catch {
+      try { element.scrollIntoView() } catch { /* Scrolling is optional, never block the form. */ }
+    }
   }, [editingProductId])
   return (
     <form

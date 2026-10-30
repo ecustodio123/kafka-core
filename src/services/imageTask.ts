@@ -15,7 +15,7 @@ export function imageTask<T>(start: (resolve: (value: T) => void, reject: (error
       settled = true
       clearTimeout(timer)
       signal?.removeEventListener('abort', abort)
-      try { cleanup() } catch { console.warn('image_operation', { category: 'resource_cleanup_failed' }) }
+      try { cleanup() } catch { try { console.warn('image_operation', { category: 'resource_cleanup_failed' }) } catch { /* Optional diagnostics. */ } }
       if (error !== undefined) reject(error); else resolve(value as T)
     }
     const abort = () => finish(undefined, signal?.reason ?? new DOMException('Preparacion cancelada.', 'AbortError'))

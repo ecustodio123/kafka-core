@@ -38,3 +38,27 @@ Unit tests: `node --test scripts/image-stability.unit.test.mjs scripts/product-i
 Browser regressions: `npm run test:products:images:browser`. HTTP is intercepted locally, including Storage. The harness includes navigation/store changes for cancellation, and fault injection for render, storage, reads, decode, Canvas, stalled operations and resource cleanup. Existing tests retain unique candidates, upsert:false, verification, conditional linking, late uploads, no ambiguous resend, idempotent creation and category/content image preparation.
 
 Then `npm run test:products:images:typecheck`, `npx tsc -b`, `npm run lint`, `npm run build`, `git diff --check`. No remote operations are needed.
+
+## Compatibility hotfix and UI incidents
+
+`Array.prototype.at` is no longer required by diagnostics. Product form scrolling checks optional APIs and catches both option/method failures; missing `matchMedia` defaults to immediate scrolling and missing scrolling becomes a no-op. No globals are polyfilled. A local compatibility helper uses secure `getRandomValues` UUID v4 when `randomUUID` is unavailable. Request deadlines use a cleared timer and `AbortController` rather than `AbortSignal.timeout`. Cryptographic hashes still require WebCrypto and image cancellation still requires AbortController; absent essential capabilities fail clearly, before unsafe writes. The catalog-deletion helper only changes UUID generation, not permissions, deletion or cleanup behavior.
+
+The same `imageDiagnostics` module now records UI incidents. Its scope is owned above the product subtree so the boundary can obtain the last non-cancellation image stage even after editor teardown. Image context is explicitly `context_only`: no attribution of the UI error to an image, memory or Storage is made.
+
+Each boundary failure gets a `KC-{UUID}` code, using a non-security `KC-LOCAL-{timestamp}-{counter}` fallback if secure ID generation is unavailable. This fallback is a local troubleshooting label, not a globally guaranteed identifier or an authorization token. One sanitized report is retained per scope at `{existing-image-diagnostic-key}.incidents` (root reports use `kafka.image-diagnostic.app.incidents`); the boundary also retains its current report in memory. It is replaced on the next incident in that scope and sessionStorage may disappear with the browsing session. There is no remote receiver; a code cannot be looked up by support remotely today. No automatic reports are sent.
+
+Reports contain an ID, time, module, deployment commit if known, allowlisted error category and normalized message, at most eight known component names and six own hashed-asset line/column frames, browser major/family, OS family and optional last image context. Raw error objects, raw messages/stacks, filenames, product fields, source URLs, origins, query strings and credentials are never persisted or logged. Error property reads are bounded to 4,096 characters and guarded, and frames accept only the application's known hashed bundle name patterns. Arbitrary/unknown frames are discarded. Unknown messages become a fixed category message. Debug source paths are not collected. Safely retained numeric bundle positions require matching private source maps/artifacts for reliable source interpretation.
+
+`main.tsx` and the boundary use one per-boundary reporter: React's caught-error hook forwards to the same instance, and `componentDidCatch` reuses the report. This avoids both raw default logging and duplicated reports. A new manual retry creates a new incident if it fails. Throwing reporters fall back to the shared sanitized writer; unavailable storage/console cannot throw out of reporting.
+
+Retry remounts the affected subtree without deleting persisted drafts. After two failed manual retries the retry button is removed; the surrounding Admin navigation remains usable. The product boundary also offers navigation to another authorized module, and the root boundary has a plain link to the application home. No automatic retry/reload loop exists. Memory-only drafts cannot survive a subtree remount; the storage warning remains relevant.
+
+Production build identity is injected from a validated hexadecimal `CF_PAGES_COMMIT_SHA` when available. No new remote setting is required; other environments report `unknown`. The test build uses a fixed non-secret fixture ID. No public source maps are enabled. Before deployment, review the diff and validate the build on real Android over HTTPS. Before central monitoring, separately authorize a tenant-isolated receiver and private source-map/retention strategy. The cause of the original customer incident remains unconfirmed.
+
+Hotfix files for review (20):
+- `src/App.tsx`, `src/main.tsx`, `src/components/RecoveryBoundary.tsx`.
+- `src/features/products/ProductsPage.tsx`, `src/features/products/productDraft.ts`.
+- `src/services/imageDiagnostics.ts`, `src/services/productCompatibility.ts`, `src/services/imageProcessing.ts`, `src/services/imageTask.ts`.
+- `src/services/productCreation.ts`, `src/services/productImagePreparation.ts`, `src/services/productImages.ts`, `src/services/products.ts`, `src/services/catalogDeletion.ts`.
+- `vite.config.ts`, `tests/product-images/vite.config.ts`, `tests/product-images/harness.tsx`, `tests/product-images/product-images.spec.ts`.
+- `scripts/image-stability.unit.test.mjs`, this document.

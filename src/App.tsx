@@ -130,7 +130,7 @@ function StoreWorkspace({ store, userId, role }: { store: Store; userId: string;
     </aside>
     <main className="min-w-0 space-y-4 px-4 py-6 sm:px-6">
       {legacy && <p role="status" className="border-l-4 border-amber-500 bg-amber-50 p-3 text-sm text-amber-950">Esta tienda aun no tiene configuracion de modulos. Commerce figura deshabilitado; conservas el acceso de compatibilidad a tu catalogo existente.</p>}
-      {active === 'products' && <ProductsPage store={store} userId={userId} />}
+      {active === 'products' && <ProductsPage store={store} userId={userId} onLeave={() => setSection(sections.includes('categories') ? 'categories' : 'modules')} />}
       {active === 'categories' && <CategoriesPage store={store} />}
       {active === 'modules' && <ModuleSettings row={features.row} superAdmin={role === 'super_admin'} saving={features.saving} save={features.save} reload={features.reload} />}
       {(active === 'services' || active === 'staff') && <ContentPage key={active} kind={active} store={store} enabled={features.row?.[active === 'services' ? 'services_enabled' : 'staff_enabled'] === true} />}

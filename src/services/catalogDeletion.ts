@@ -1,3 +1,4 @@
+import { productUuid } from './productCompatibility.ts'
 import { getSupabaseClient } from '../lib/supabase'
 
 export type CatalogKind = 'product' | 'category'
@@ -25,7 +26,7 @@ export async function deleteCatalogEntity(storeId: number, kind: CatalogKind, id
   const key = `${await scope(storeId, kind)}${id}`
   const existing = sessionStorage.getItem(key)
   if (existing && !uuid.test(existing)) throw new Error('No se pudo eliminar. Actualiza la página antes de volver a intentarlo.')
-  const operation = existing ?? crypto.randomUUID()
+  const operation = existing ?? productUuid()
   sessionStorage.setItem(key, operation) // Before HTTP; no payload, image URL or credential is persisted.
   const result = await invoke({ action: 'delete', store_id: storeId, kind, entity_id: id, operation_id: operation })
   if (result.deleted !== true) throw new Error('No se pudo confirmar la eliminación. Actualiza la lista antes de volver a intentarlo.')

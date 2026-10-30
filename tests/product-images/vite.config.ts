@@ -7,6 +7,7 @@ export default defineConfig({
   envDir: false,
   plugins: [react(), tailwindcss()],
   define: {
+    'import.meta.env.VITE_APP_BUILD_ID': JSON.stringify('123abcd456ef'),
     'import.meta.env.VITE_SUPABASE_URL': JSON.stringify('http://127.0.0.1:5197'),
     'import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY': JSON.stringify('local-public-test-key'),
   },
